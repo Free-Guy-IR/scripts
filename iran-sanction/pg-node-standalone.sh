@@ -486,7 +486,7 @@ install_command() {
 
     check_version_exists() {
         local version="$1"
-        local repo_url="https://api.github.com/repos/PasarGuard/node/releases"
+        local repo_url="https://api.github.com/repos/Free-Guy-IR/node/releases"
         
         # In standalone mode, we trust 'latest' and 'pre-release' and 'dev' without checking GitHub
         if [[ "$version" == "latest" || "$version" == "pre-release" || "$version" == "dev" ]]; then
@@ -507,7 +507,7 @@ install_command() {
         return 1
     }
 
-    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
         if check_version_exists "$node_version"; then
             colorized_echo cyan "================================"
             colorized_echo cyan "Installing PasarGuard Node"

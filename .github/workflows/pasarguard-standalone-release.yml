@@ -21,9 +21,9 @@ jobs:
           set -euo pipefail
           mkdir -p dist/pasarguard-assets
           mkdir -p dist/pg-node-assets
-          curl -fsSL https://raw.githubusercontent.com/pasarguard/panel/main/.env.example -o dist/pasarguard-assets/.env.example
-          curl -fsSL https://raw.githubusercontent.com/pasarguard/panel/main/docker-compose.yml -o dist/pasarguard-assets/pasarguard-sqlite.yml
-          curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/.env.example -o dist/pg-node-assets/.env.example
+          curl -fsSL https://raw.githubusercontent.com/Free-Guy-IR/panel/main/.env.example -o dist/pasarguard-assets/.env.example
+          curl -fsSL https://raw.githubusercontent.com/Free-Guy-IR/panel/main/docker-compose.yml -o dist/pasarguard-assets/pasarguard-sqlite.yml
+          curl -fsSL https://raw.githubusercontent.com/Free-Guy-IR/node/main/.env.example -o dist/pg-node-assets/.env.example
 
       - name: Build standalone bundle
         run: |

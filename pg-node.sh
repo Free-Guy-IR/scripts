@@ -18,7 +18,7 @@ fi
 # succeeds, so a partial/failed refresh never leaves a half-updated set and any
 # existing copy is preserved on failure.
 bootstrap_pg_node_shared_libs() {
-    local fetch_repo="PasarGuard/scripts"
+    local fetch_repo="Free-Guy-IR/scripts"
     local bootstrap_dir="/usr/local/lib/pasarguard-scripts/lib"
     local tmp_dir=""
     local shared_lib=""
@@ -164,7 +164,7 @@ ENV_FILE="$APP_DIR/.env"
 SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
-FETCH_REPO="PasarGuard/scripts"
+FETCH_REPO="Free-Guy-IR/scripts"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
@@ -686,8 +686,8 @@ read_and_save_file() {
 }
 install_node() {
     local node_version=$1
-    FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/node/main"
-    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main/docker-compose"
+    FILES_URL_PREFIX="https://raw.githubusercontent.com/Free-Guy-IR/node/main"
+    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/Free-Guy-IR/scripts/main/docker-compose"
     colorized_echo blue "Creating directories..."
     colorized_echo cyan "  Command: mkdir -p $DATA_DIR $DATA_DIR/certs $APP_DIR"
     mkdir -p "$DATA_DIR"
@@ -890,14 +890,14 @@ uninstall_node() {
 }
 uninstall_node_docker_images() {
     local images
-    images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^pasarguard\/node(:|$)/ {print $2}' | sort -u)
+    images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^ghcr\.io\/free-guy-ir\/node(:|$)/ {print $2}' | sort -u)
 
     if [ -z "$images" ]; then
-        colorized_echo yellow "pasarguard/node images not found"
+        colorized_echo yellow "ghcr.io/free-guy-ir/node images not found"
         return 0
     fi
 
-    colorized_echo yellow "Checking pasarguard/node images for removal..."
+    colorized_echo yellow "Checking ghcr.io/free-guy-ir/node images for removal..."
 
     for image in $images; do
         if docker ps -a --filter "ancestor=$image" -q | grep -q .; then
@@ -1121,7 +1121,7 @@ install_command() {
     # Function to check if a version exists in the GitHub releases
     check_version_exists() {
         local version=$1
-        repo_url="https://api.github.com/repos/PasarGuard/node/releases"
+        repo_url="https://api.github.com/repos/Free-Guy-IR/node/releases"
         if [ "$version" == "latest" ]; then
             latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
             # Check if there is any stable release of  node v1
@@ -1154,7 +1154,7 @@ install_command() {
         fi
     }
     # Check if the version is valid and exists
-    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
         if check_version_exists "$node_version"; then
             colorized_echo cyan "================================"
             colorized_echo cyan "Installing PasarGuard Node"

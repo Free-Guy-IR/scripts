@@ -18,7 +18,7 @@ fi
 # succeeds, so a partial/failed refresh never leaves a half-updated set and any
 # existing copy is preserved on failure.
 bootstrap_pasarguard_shared_libs() {
-    local fetch_repo="PasarGuard/scripts"
+    local fetch_repo="Free-Guy-IR/scripts"
     local bootstrap_dir="/usr/local/lib/pasarguard-scripts/lib"
     local tmp_dir=""
     local shared_lib=""
@@ -927,7 +927,7 @@ verify_and_start_container() {
 }
 
 install_pasarguard_script() {
-    FETCH_REPO="PasarGuard/scripts"
+    FETCH_REPO="Free-Guy-IR/scripts"
     colorized_echo blue "Installing pasarguard script"
     install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh
     github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"
@@ -951,7 +951,7 @@ set_pasarguard_panel_image() {
     while IFS= read -r service_name; do
         [ -z "$service_name" ] && continue
         image_name=$(yq eval -r ".services.\"${service_name}\".image // \"\"" "$COMPOSE_FILE" 2>/dev/null)
-        if [[ "$image_name" =~ ^pasarguard/panel([:@].*)?$ ]]; then
+        if [[ "$image_name" =~ ^ghcr\.io/free-guy-ir/panel([:@].*)?$ ]]; then
             yq -i ".services.\"${service_name}\".image = \"${target_image}\"" "$COMPOSE_FILE"
             updated_any=true
         fi
@@ -976,8 +976,8 @@ install_pasarguard() {
     local major_version=$2
     local database_type=$3
 
-    FILES_URL_PREFIX="https://raw.githubusercontent.com/pasarguard/panel"
-    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/pasarguard/scripts/main/docker-compose"
+    FILES_URL_PREFIX="https://raw.githubusercontent.com/Free-Guy-IR/panel"
+    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/Free-Guy-IR/scripts/main/docker-compose"
 
     mkdir -p "$DATA_DIR"
     mkdir -p "$APP_DIR"
@@ -1072,9 +1072,9 @@ install_pasarguard() {
     fi
 
     # Install requested version
-    local target_image="pasarguard/panel:${pasarguard_version}"
+    local target_image="ghcr.io/free-guy-ir/panel:${pasarguard_version}"
     if [ "$pasarguard_version" == "latest" ]; then
-        target_image="pasarguard/panel:latest"
+        target_image="ghcr.io/free-guy-ir/panel:latest"
     fi
     set_pasarguard_panel_image "$target_image"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
@@ -1371,7 +1371,7 @@ install_command() {
     # Function to check if a version exists in the GitHub releases
     check_version_exists() {
         local version=$1
-        repo_url="https://api.github.com/repos/pasarguard/panel/releases"
+        repo_url="https://api.github.com/repos/Free-Guy-IR/panel/releases"
 
         if [[ "$version" == "latest" || "$version" == "pre-release" || "$version" == "dev" ]]; then
             local latest_tag
@@ -1566,14 +1566,14 @@ uninstall_pasarguard() {
 
 uninstall_pasarguard_docker_images() {
     local images
-    images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^pasarguard\/panel(:|$)/ {print $2}' | sort -u)
+    images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^ghcr\.io\/free-guy-ir\/panel(:|$)/ {print $2}' | sort -u)
 
     if [ -z "$images" ]; then
-        colorized_echo yellow "pasarguard/panel images not found"
+        colorized_echo yellow "ghcr.io/free-guy-ir/panel images not found"
         return 0
     fi
 
-    colorized_echo yellow "Checking pasarguard/panel images for removal..."
+    colorized_echo yellow "Checking ghcr.io/free-guy-ir/panel images for removal..."
 
     for image in $images; do
         if docker ps -a --filter "ancestor=$image" -q | grep -q .; then
@@ -1812,7 +1812,7 @@ update_command() {
 }
 
 update_pasarguard_script() {
-    FETCH_REPO="PasarGuard/scripts"
+    FETCH_REPO="Free-Guy-IR/scripts"
     colorized_echo blue "Updating pasarguard script"
 
     local backup_dir
@@ -1870,10 +1870,10 @@ install_node_command() {
 
     if [ "$(id -u)" = "0" ]; then
         colorized_echo blue "Running node installation as root..."
-        bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
+        bash -c "$(curl -sL https://github.com/Free-Guy-IR/scripts/raw/main/pg-node.sh)" @ install
     else
         colorized_echo blue "Running node installation with sudo..."
-        sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
+        sudo bash -c "$(curl -sL https://github.com/Free-Guy-IR/scripts/raw/main/pg-node.sh)" @ install
     fi
 
     if [ $? -eq 0 ]; then

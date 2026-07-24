@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/pg-node-assets
-          curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/.env.example -o dist/pg-node-assets/.env.example
+          curl -fsSL https://raw.githubusercontent.com/Free-Guy-IR/node/main/.env.example -o dist/pg-node-assets/.env.example
 
       - name: Build standalone bundle
         run: |

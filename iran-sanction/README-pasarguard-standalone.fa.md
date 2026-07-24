@@ -16,10 +16,10 @@
 ### سناریو ۱: سرور به GitHub دسترسی دارد
 
 - لینک مستقیم آخرین فایل انتشار:
-  [pasarguard-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
+  [pasarguard-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
 
 ```bash
-curl -LO https://github.com/PasarGuard/scripts/releases/download/<tag>/pasarguard-standalone.tar.gz
+curl -LO https://github.com/Free-Guy-IR/scripts/releases/download/<tag>/pasarguard-standalone.tar.gz
 tar -xzf pasarguard-standalone.tar.gz
 cd pasarguard-standalone
 chmod +x iran-sanction/pasarguard-standalone.sh
@@ -34,7 +34,7 @@ pasarguard install --database timescaledb
 فایل انتشار را روی یک سیستم دیگر دانلود کنید، سپس با `scp`، SFTP، پنل یا هر روش انتقال فایل دیگر آن را به سرور منتقل کنید.
 
 - لینک دانلود فایل انتشار برای انتقال به سرور:
-  [pasarguard-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
+  [pasarguard-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
 
 ```bash
 tar -xzf pasarguard-standalone.tar.gz

@@ -237,7 +237,7 @@ install_yq() {
 set_pasarguard_panel_image() {
     local target_image="$1"
     [ -f "$COMPOSE_FILE" ] || die "Compose file not found: $COMPOSE_FILE"
-    sed -i "0,/^[[:space:]]*image:[[:space:]]*pasarguard\/panel:.*/s#^[[:space:]]*image:[[:space:]]*pasarguard/panel:.*#    image: ${target_image}#" "$COMPOSE_FILE"
+    sed -i "0,/^[[:space:]]*image:[[:space:]]*ghcr\.io\/free-guy-ir\/panel:.*/s#^[[:space:]]*image:[[:space:]]*ghcr\.io/free-guy-ir/panel:.*#    image: ${target_image}#" "$COMPOSE_FILE"
 }
 
 detect_compose() {
@@ -393,9 +393,9 @@ install_pasarguard() {
         sed -i "s~\(SQLALCHEMY_DATABASE_URL = \).*~\1\"${db_driver_scheme}:////${DATA_DIR}/db.sqlite3\"~" "$APP_DIR/.env"
     fi
 
-    target_image="pasarguard/panel:${pasarguard_version}"
+    target_image="ghcr.io/free-guy-ir/panel:${pasarguard_version}"
     if [ "$pasarguard_version" = "latest" ]; then
-        target_image="pasarguard/panel:latest"
+        target_image="ghcr.io/free-guy-ir/panel:latest"
     fi
     set_pasarguard_panel_image "$target_image"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"

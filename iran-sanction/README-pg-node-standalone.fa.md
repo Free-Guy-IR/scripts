@@ -16,10 +16,10 @@
 ### سناریو ۱: سرور به GitHub دسترسی دارد
 
 - لینک مستقیم آخرین فایل انتشار:
-  [pg-node-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pg-node-standalone.tar.gz)
+  [pg-node-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pg-node-standalone.tar.gz)
 
 ```bash
-curl -LO https://github.com/PasarGuard/scripts/releases/download/<tag>/pg-node-standalone.tar.gz
+curl -LO https://github.com/Free-Guy-IR/scripts/releases/download/<tag>/pg-node-standalone.tar.gz
 tar -xzf pg-node-standalone.tar.gz
 cd pg-node-standalone
 chmod +x iran-sanction/pg-node-standalone.sh
@@ -34,7 +34,7 @@ pg-node install
 فایل انتشار را روی یک سیستم دیگر دانلود کنید، سپس با `scp`، SFTP، پنل یا هر روش انتقال فایل دیگر آن را به سرور منتقل کنید.
 
 - لینک دانلود فایل انتشار برای انتقال به سرور:
-  [pg-node-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pg-node-standalone.tar.gz)
+  [pg-node-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pg-node-standalone.tar.gz)
 
 ```bash
 tar -xzf pg-node-standalone.tar.gz

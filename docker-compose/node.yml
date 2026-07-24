@@ -1,7 +1,7 @@
 services:
   node:
     container_name: node
-    image: pasarguard/node:latest
+    image: ghcr.io/free-guy-ir/node:latest
     restart: always
     network_mode: host
     cap_add:

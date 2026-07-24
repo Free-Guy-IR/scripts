@@ -298,7 +298,7 @@ elif [[ "$*" == *"config"* ]]; then
     cat <<'EOM'
 services:
   panel:
-    image: pasarguard/panel
+    image: ghcr.io/free-guy-ir/panel
     labels:
       ROLE: backend
   postgres:
