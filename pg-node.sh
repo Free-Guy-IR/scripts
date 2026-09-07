@@ -920,6 +920,111 @@ uninstall_node_data_files() {
         rm -r "$DATA_DIR"
     fi
 }
+PG_NODE_MODULES_FILE="/etc/modules-load.d/pg-node.conf"
+PG_NODE_SYSCTL_FILE="/etc/sysctl.d/99-pg-node.conf"
+
+persist_line() {
+    local file="$1" line="$2"
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    touch "$file" 2>/dev/null || return 1
+    grep -qxF "$line" "$file" 2>/dev/null || echo "$line" >>"$file"
+}
+
+load_and_persist_module() {
+    local module="$1"
+    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx "$module"; then
+        persist_line "$PG_NODE_MODULES_FILE" "$module"
+        return 0
+    fi
+    modinfo "$module" >/dev/null 2>&1 || return 1
+    modprobe "$module" >/dev/null 2>&1 || return 1
+    persist_line "$PG_NODE_MODULES_FILE" "$module"
+    return 0
+}
+
+enable_ip_forwarding() {
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || return 1
+    persist_line "$PG_NODE_SYSCTL_FILE" "net.ipv4.ip_forward=1"
+    return 0
+}
+
+compose_has_device() {
+    local file="$1" service="$2" device="$3"
+    yq eval -r ".services[\"$service\"].devices // [] | .[]" "$file" 2>/dev/null | grep -qxF "$device"
+}
+
+compose_add_device() {
+    local device="$1" service="${2:-node}"
+    local file="$APP_DIR/docker-compose.yml"
+    [ -f "$file" ] || return 1
+    compose_has_device "$file" "$service" "$device" && return 0
+    yq eval ".services[\"$service\"].devices = ((.services[\"$service\"].devices // []) + [\"$device\"] | unique)" -i "$file" 2>/dev/null || return 1
+    compose_has_device "$file" "$service" "$device"
+}
+
+compose_remove_device() {
+    local device="$1" service="${2:-node}"
+    local file="$APP_DIR/docker-compose.yml"
+    [ -f "$file" ] || return 1
+    yq eval "del(.services[\"$service\"].devices[] | select(. == \"$device\"))" -i "$file" 2>/dev/null
+}
+
+prepare_host_devices() {
+    local service_name="${1:-node}"
+    colorized_echo blue "Preparing host support for tunnelling cores"
+
+    if enable_ip_forwarding; then
+        colorized_echo green "  ✓ net.ipv4.ip_forward enabled and persisted"
+    else
+        colorized_echo yellow "  ! could not enable net.ipv4.ip_forward; WireGuard and L2TP will not forward traffic"
+    fi
+
+    load_and_persist_module tun >/dev/null 2>&1 || true
+    if [ -c /dev/net/tun ]; then
+        if compose_add_device "/dev/net/tun:/dev/net/tun" "$service_name"; then
+            colorized_echo green "  ✓ /dev/net/tun mapped into the container (OpenVPN)"
+        else
+            colorized_echo yellow "  ! could not map /dev/net/tun into the compose file"
+        fi
+    else
+        compose_remove_device "/dev/net/tun:/dev/net/tun" "$service_name" || true
+        colorized_echo yellow "  ! /dev/net/tun is unavailable on this host; OpenVPN cores cannot run here"
+    fi
+
+    load_and_persist_module ppp_generic >/dev/null 2>&1 || true
+    load_and_persist_module l2tp_ppp >/dev/null 2>&1 || true
+    if [ -c /dev/ppp ]; then
+        if compose_add_device "/dev/ppp:/dev/ppp" "$service_name"; then
+            colorized_echo green "  ✓ /dev/ppp mapped into the container (L2TP/IPsec)"
+        else
+            colorized_echo yellow "  ! could not map /dev/ppp into the compose file"
+        fi
+    else
+        compose_remove_device "/dev/ppp:/dev/ppp" "$service_name" || true
+        colorized_echo yellow "  ! /dev/ppp is unavailable on this host; L2TP cores cannot run here"
+        colorized_echo yellow "    install this kernel's extra modules package, then run: $APP_NAME l2tp-enable"
+    fi
+}
+
+l2tp_enable_command() {
+    check_running_as_root
+    if ! is_node_installed; then
+        colorized_echo red "node is not installed at $APP_DIR"
+        exit 1
+    fi
+    detect_os
+    if ! command -v yq >/dev/null 2>&1; then
+        install_yq
+    fi
+    detect_compose
+    prepare_host_devices "node"
+    if is_node_up; then
+        colorized_echo blue "Restarting the node so the change takes effect"
+        down_node
+        up_node
+    fi
+}
+
 up_node() {
     compose_up
 }
@@ -1172,6 +1277,7 @@ install_command() {
     fi
     install_node_script
     install_completion
+    prepare_host_devices "node"
     up_node
     show_node_logs
     local install_service_choice=""
@@ -1881,7 +1987,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs install update uninstall l2tp-enable install-script uninstall-script core-update geofiles renew-cert edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1904,6 +2010,7 @@ commands=(
   install
   update
   uninstall
+  l2tp-enable
   install-script
   uninstall-script
   core-update
@@ -1980,6 +2087,7 @@ usage() {
     colorized_echo yellow "  install           $(tput sgr0)✓  Install/reinstall node"
     colorized_echo yellow "  update            $(tput sgr0)✓  Update to latest version"
     colorized_echo yellow "  uninstall         $(tput sgr0)✓  Uninstall node"
+    colorized_echo yellow "  l2tp-enable       $(tput sgr0)✓  Load ppp/tun modules and map their devices for L2TP and OpenVPN"
     colorized_echo yellow "  install-script    $(tput sgr0)✓  Install node script"
     colorized_echo yellow "  uninstall-script  $(tput sgr0)✓  Uninstall node script"
     colorized_echo yellow "  service-install   $(tput sgr0)✓  Install and start pg-node-service (systemd)"
@@ -2258,6 +2366,9 @@ pg_node_main() {
     renew-cert)
         shift
         renew_cert_command "$@"
+        ;;
+    l2tp-enable)
+        l2tp_enable_command
         ;;
     install-script)
         install_node_script

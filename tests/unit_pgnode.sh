@@ -280,5 +280,66 @@ sync_env_ssl_paths
 pass "sync_env_ssl_paths: no crash when ENV_FILE missing"
 
 echo ""
+
+# -----------------------------------------------------------------------
+# host device preparation (tun / ppp) for OpenVPN and L2TP
+# -----------------------------------------------------------------------
+DEV_APP_DIR="$WORK_DIR/devapp"
+mkdir -p "$DEV_APP_DIR"
+cat > "$DEV_APP_DIR/docker-compose.yml" <<'YML'
+services:
+  node:
+    container_name: node
+    image: ghcr.io/free-guy-ir/node:latest
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - /var/lib/pg-node:/var/lib/pg-node
+YML
+
+assert_false "compose_has_device: absent on a fresh compose" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
+APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/ppp:/dev/ppp" node
+assert_true  "compose_add_device: ppp device added" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
+APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/ppp:/dev/ppp" node
+assert_eq "$(yq eval -r '.services.node.devices | length' "$DEV_APP_DIR/docker-compose.yml")" "1" "compose_add_device: idempotent, no duplicate"
+APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/net/tun:/dev/net/tun" node
+assert_eq "$(yq eval -r '.services.node.devices | length' "$DEV_APP_DIR/docker-compose.yml")" "2" "compose_add_device: second device appended"
+assert_eq "$(yq eval -r '.services.node.cap_add[0]' "$DEV_APP_DIR/docker-compose.yml")" "NET_ADMIN" "compose_add_device: untouched keys survive"
+APP_DIR="$DEV_APP_DIR" compose_remove_device "/dev/ppp:/dev/ppp" node
+assert_false "compose_remove_device: ppp device gone" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
+assert_true  "compose_remove_device: other device kept" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/net/tun:/dev/net/tun"
+APP_DIR="$DEV_APP_DIR" compose_remove_device "/dev/ppp:/dev/ppp" node
+assert_eq "$?" "0" "compose_remove_device: removing an absent device is not an error"
+assert_false "compose_add_device: fails cleanly without a compose file" env APP_DIR="$WORK_DIR/nowhere" bash -c 'source "$0"; compose_add_device "/dev/ppp:/dev/ppp" node' "$ROOT_DIR/pg-node.sh"
+
+PERSIST_FILE="$WORK_DIR/persist.conf"
+persist_line "$PERSIST_FILE" "ppp_generic"
+persist_line "$PERSIST_FILE" "ppp_generic"
+persist_line "$PERSIST_FILE" "tun"
+assert_eq "$(grep -c . "$PERSIST_FILE")" "2" "persist_line: idempotent and appending"
+assert_eq "$(sed -n 1p "$PERSIST_FILE")" "ppp_generic" "persist_line: order preserved"
+
+PG_NODE_MODULES_FILE="$WORK_DIR/modules.conf"
+lsmod()   { printf 'Module Size Used\nalready_loaded 1 0\n'; }
+modinfo() { [ "$1" = "loadable" ] || [ "$1" = "already_loaded" ]; }
+modprobe(){ [ "$1" = "loadable" ]; }
+assert_true  "load_and_persist_module: already-loaded module is persisted without modprobe" load_and_persist_module already_loaded
+assert_true  "load_and_persist_module: loadable module is loaded" load_and_persist_module loadable
+assert_false "load_and_persist_module: unknown module returns non-zero" load_and_persist_module missing_module
+assert_eq "$(sort "$PG_NODE_MODULES_FILE" | tr '\n' ' ')" "already_loaded loadable " "load_and_persist_module: only successful modules persisted"
+unset -f lsmod modinfo modprobe
+
+PG_NODE_SYSCTL_FILE="$WORK_DIR/sysctl.conf"
+sysctl() { return 0; }
+assert_true "enable_ip_forwarding: succeeds and persists" enable_ip_forwarding
+assert_eq "$(cat "$PG_NODE_SYSCTL_FILE")" "net.ipv4.ip_forward=1" "enable_ip_forwarding: persisted line"
+sysctl() { return 1; }
+assert_false "enable_ip_forwarding: reports failure when sysctl fails" enable_ip_forwarding
+unset -f sysctl
+
+assert_true "bash completion lists l2tp-enable" bash -c "$(declare -f generate_bash_completion); APP_NAME=x generate_bash_completion | grep -q l2tp-enable"
+assert_true "zsh completion lists l2tp-enable" bash -c "$(declare -f generate_zsh_completion); APP_NAME=x generate_zsh_completion | grep -q l2tp-enable"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
