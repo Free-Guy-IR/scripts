@@ -10,6 +10,7 @@
 | Option               | Description                                                                                  |
 | -------------------- | -------------------------------------------------------------------------------------------- |
 | `--database`         | Optional. Choose from: `mysql`, `mariadb`, `postgres`, `timescaledb`. Default is `sqlite`. |
+| `--sub-template [lang]` | Optional. Also install the PasarGuard subscription page (`fa`, `en`, `ru`, `zh`; default `fa`). Without it the installer asks. |
 | `--version <vX.Y.Z>` | Install a specific version, including pre-releases (e.g., `v0.5.2`, `v1.0.0-beta.1`)       |
 | `--dev`              | Install the latest development version (only for versions **before v1.0.0**)                |
 | `--pre-release`      | Install the latest pre-release version (only for versions **v1.0.0 and later**)             |

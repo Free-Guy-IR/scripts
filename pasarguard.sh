@@ -1240,6 +1240,28 @@ check_existing_database_volumes() {
     echo
 }
 
+SUB_TEMPLATE_INSTALLER_URL="https://raw.githubusercontent.com/Free-Guy-IR/subscription-template/main/install.sh"
+
+install_subscription_template() {
+    local lang="${1:-fa}"
+    local tmp
+    tmp="$(mktemp)" || return 1
+    colorized_echo blue "Fetching the subscription page installer..."
+    if ! curl -fsSL --max-time 60 "$SUB_TEMPLATE_INSTALLER_URL" -o "$tmp"; then
+        rm -f "$tmp"
+        colorized_echo red "Could not download the subscription page installer; continuing without it."
+        return 1
+    fi
+    if bash "$tmp" --lang "$lang"; then
+        rm -f "$tmp"
+        colorized_echo green "Custom subscription page installed (${lang})."
+        return 0
+    fi
+    rm -f "$tmp"
+    colorized_echo red "The subscription page installer failed; continuing without it."
+    return 1
+}
+
 install_command() {
     check_running_as_root
 
@@ -1251,11 +1273,23 @@ install_command() {
     ssl_mode="auto"
     ssl_domain=""
     ssl_http_port="80"
+    sub_template_lang=""
+    sub_template_requested="false"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
         key="$1"
         case $key in
+        --sub-template)
+            sub_template_requested="true"
+            if [[ -n "${2:-}" && "$2" != --* ]]; then
+                sub_template_lang="$2"
+                shift 2
+            else
+                sub_template_lang="fa"
+                shift
+            fi
+            ;;
         --database)
             database_type="$2"
             if [[ ! $database_type =~ ^(mysql|mariadb|postgresql|timescaledb)$ ]]; then
@@ -1388,7 +1422,7 @@ install_command() {
 
         local http_code
         http_code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "${repo_url}/tags/${version}" 2>/dev/null || echo "000")
-        if [[ "$http_code" == "200" || "$http_code" == "000" ]]; then
+        if [[ "$http_code" == "200" ]]; then
             major_version=$(echo "$version" | sed 's/^v//' | sed 's/[^0-9]*\([0-9]*\)\..*/\1/')
             [ -z "$major_version" ] && major_version=1
             return 0
@@ -1454,6 +1488,20 @@ install_command() {
         # Update ALLOWED_ORIGINS to reflect the new port
         if grep -qE '^\s*ALLOWED_ORIGINS\s*=' "$ENV_FILE"; then
             sed -i "s|localhost:${configured_port}|localhost:${new_port}|g" "$ENV_FILE"
+        fi
+    fi
+
+    if [[ "$sub_template_requested" == "true" ]]; then
+        install_subscription_template "$sub_template_lang"
+    else
+        echo
+        colorized_echo cyan "Install the custom PasarGuard subscription page?"
+        read -p "Install it now? (Y/n) " sub_template_choice
+        if [[ ! $sub_template_choice =~ ^[Nn]$ ]]; then
+            read -p "Language for the subscription page [fa/en/ru/zh] (default fa): " sub_template_lang_choice
+            install_subscription_template "${sub_template_lang_choice:-fa}"
+        else
+            colorized_echo yellow "Skipping the custom subscription page."
         fi
     fi
 
