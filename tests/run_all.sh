@@ -13,6 +13,8 @@ SUITES=(
     "unit_lib_system.sh"
     "unit_pasarguard.sh"
     "unit_pgnode.sh"
+    "test_node_service_transaction_guard.sh"
+    "test_node_service_readiness_tls.sh"
     "unit_pgnode_service.sh"
     "unit_restore_archive_safety.sh"
     "test_script_update_safety.sh"
