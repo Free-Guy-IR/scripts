@@ -11,6 +11,11 @@ on:
       - "lib/**"
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
+      - "tests/test_fork_script_repo.sh"
+      - "install_core.sh"
+      - "pg-node.sh"
+      - "pg-node-service.sh"
+      - "iran-sanction/**"
   pull_request:
     paths:
       - ".github/workflows/fork-regression-tests.yml"
@@ -18,6 +23,11 @@ on:
       - "lib/**"
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
+      - "tests/test_fork_script_repo.sh"
+      - "install_core.sh"
+      - "pg-node.sh"
+      - "pg-node-service.sh"
+      - "iran-sanction/**"
   workflow_dispatch:
 
 jobs:
@@ -39,3 +49,6 @@ jobs:
 
       - name: A failed restore restarts the panel and keeps its log
         run: bash tests/test_restore_failure_restarts_panel.sh
+
+      - name: The scripts report and fetch the fork, not upstream
+        run: bash tests/test_fork_script_repo.sh
