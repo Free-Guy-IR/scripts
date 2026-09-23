@@ -819,7 +819,7 @@ list_pasarguard_app_services() {
             is_app = 0
             next
         }
-        /^[[:space:]]+image:[[:space:]]*pasarguard\/panel([:@].*)?$/ {
+        /^[[:space:]]+image:[[:space:]]*(ghcr\.io\/free-guy-ir\/panel|pasarguard\/panel)([:@].*)?$/ {
             is_app = 1
             next
         }
