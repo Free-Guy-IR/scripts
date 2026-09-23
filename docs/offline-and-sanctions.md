@@ -73,7 +73,7 @@ Standalone packages include all required Compose templates, installer scripts, a
 
 If the server can reach GitHub releases or domestic mirrors:
 ```bash
-curl -LO https://github.com/PasarGuard/scripts/releases/latest/download/pasarguard-standalone.tar.gz
+curl -LO https://github.com/Free-Guy-IR/scripts/releases/latest/download/pasarguard-standalone.tar.gz
 tar -xzf pasarguard-standalone.tar.gz
 cd pasarguard-standalone
 chmod +x iran-sanction/pasarguard-standalone.sh
@@ -86,14 +86,14 @@ sudo pasarguard install --database timescaledb
 Because air-gapped hosts have no internet connectivity and standalone bundles contain configuration templates and scripts rather than container images, required Docker images must be pre-provisioned:
 
 1. Download the release bundle onto an external computer with internet access:
-   - [pasarguard-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
-   - [pg-node-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pg-node-standalone.tar.gz)
+   - [pasarguard-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
+   - [pg-node-standalone.tar.gz](https://github.com/Free-Guy-IR/scripts/releases/latest/download/pg-node-standalone.tar.gz)
 
 2. Pull and save the required Docker images on the connected machine (or push to an accessible local registry):
    ```bash
    # Panel stack image (example for default SQLite install):
-   docker pull ghcr.io/pasarguard/panel:latest
-   docker save ghcr.io/pasarguard/panel:latest -o pasarguard-images.tar
+   docker pull ghcr.io/free-guy-ir/panel:latest
+   docker save ghcr.io/free-guy-ir/panel:latest -o pasarguard-images.tar
    ```
 
 3. Transfer both the release bundle and image archive to the air-gapped host via `scp`, SFTP, or USB drive:
