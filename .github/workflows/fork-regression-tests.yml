@@ -12,6 +12,7 @@ on:
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
+      - "tests/test_node_serviced_checksum.sh"
       - "install_core.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -24,6 +25,7 @@ on:
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
+      - "tests/test_node_serviced_checksum.sh"
       - "install_core.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -52,3 +54,6 @@ jobs:
 
       - name: The scripts report and fetch the fork, not upstream
         run: bash tests/test_fork_script_repo.sh
+
+      - name: node-serviced is installed only when it matches the release checksum
+        run: bash tests/test_node_serviced_checksum.sh
