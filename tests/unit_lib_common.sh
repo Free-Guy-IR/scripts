@@ -14,9 +14,12 @@ source "$ROOT_DIR/lib/common.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -81,6 +84,77 @@ assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: appended co
 
 # Empty path is rejected without creating anything.
 if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; else pass "harden_secret_file: rejects empty path"; fi
+
+# --- SQLite SQLAlchemy URL helpers ---
+assert_eq "$(normalize_posix_path '/var/lib/pasarguard///')" "/var/lib/pasarguard" \
+    "normalize_posix_path: removes repeated trailing slashes"
+assert_eq "$(sqlite_database_path_from_url 'sqlite:///db.sqlite3')" "db.sqlite3" \
+    "sqlite_database_path_from_url: relative path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: absolute path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: legacy five-slash path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite:////var/lib/pasarguard/db.sqlite3?mode=ro#fragment')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: strips query and fragment"
+if sqlite_database_path_from_url 'sqlite:/var/lib/pasarguard/db.sqlite3' >/dev/null; then
+    fail "sqlite_database_path_from_url: malformed URL rejected"
+else
+    pass "sqlite_database_path_from_url: malformed URL rejected"
+fi
+assert_eq "$(sqlite_absolute_database_url 'sqlite+aiosqlite' '/var/lib/pasarguard/db.sqlite3')" \
+    "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3" "sqlite_absolute_database_url: exactly four slashes"
+
+# --- get_script_commit_sha & print_script_execution_header ---
+assert_eq "$(get_script_commit_sha "$WORK_DIR" "a23123f03978989e95d257beb9de0c5ad9da6e70")" \
+    "a23123f03978989e95d257beb9de0c5ad9da6e70" "get_script_commit_sha: returns baked-in SHA"
+
+(
+    export PASARGUARD_SCRIPT_COMMIT="custom_env_commit_sha"
+    assert_eq "$(get_script_commit_sha "$WORK_DIR" "__SCRIPT_COMMIT_SHA__")" \
+        "custom_env_commit_sha" "get_script_commit_sha: respects PASARGUARD_SCRIPT_COMMIT override"
+)
+
+(
+    export SCRIPT_COMMIT_SHA="custom_script_sha"
+    assert_eq "$(get_script_commit_sha "$WORK_DIR" "__SCRIPT_COMMIT_SHA__")" \
+        "custom_script_sha" "get_script_commit_sha: respects SCRIPT_COMMIT_SHA override"
+)
+
+git_expected=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "main")
+assert_eq "$(get_script_commit_sha "$ROOT_DIR" "__SCRIPT_COMMIT_SHA__")" \
+    "$git_expected" "get_script_commit_sha: resolves commit from git repo"
+
+no_git_dir="$WORK_DIR/no_git_dir"
+mkdir -p "$no_git_dir"
+(
+    export PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP=1
+    assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
+        "main" "get_script_commit_sha: falls back to 'main' outside git repo when remote lookup is unavailable"
+)
+
+# When no git checkout is present (e.g. `curl | bash` installs), the real
+# commit SHA is resolved from GitHub instead of printing the literal branch name.
+(
+    stub_bin_dir="$WORK_DIR/stub_bin"
+    mkdir -p "$stub_bin_dir"
+    cat >"$stub_bin_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"sha":"deadbeef1234567890deadbeef1234567890dead","commit":{"tree":{"sha":"other"}}}'
+EOF
+    chmod +x "$stub_bin_dir/curl"
+    export PATH="$stub_bin_dir:$PATH"
+    assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
+        "deadbeef1234567890deadbeef1234567890dead" \
+        "get_script_commit_sha: resolves real commit SHA from GitHub when no git checkout is available"
+)
+
+assert_eq "$(print_script_execution_header "pasarguard" "test_commit_sha" "install")" \
+    "# Executing pasarguard install script, commit: test_commit_sha" \
+    "print_script_execution_header: formats install banner correctly"
+
+assert_eq "$(print_script_execution_header "pg-node" "test_commit_sha")" \
+    "# Executing pg-node script, commit: test_commit_sha" \
+    "print_script_execution_header: formats general script banner correctly"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

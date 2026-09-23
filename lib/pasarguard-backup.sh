@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Mask sensitive Telegram bot token for display, showing only the last 6 chars.
 mask_telegram_bot_key() {
     local secret="$1"
     local length=${#secret}
@@ -17,6 +18,7 @@ mask_telegram_bot_key() {
     printf '****%s\n' "${secret: -6}"
 }
 
+# Remove existing PasarGuard backup cron jobs from a crontab file.
 filter_backup_cron_entries() {
     local source_file="$1"
     local target_file="$2"
@@ -108,6 +110,7 @@ format_backup_interval() {
     fi
 }
 
+# Determine whether a database hostname points to localhost/loopback.
 is_local_db_host() {
     local host="${1:-}"
 
@@ -144,7 +147,97 @@ pg_manifest_encode() {
     printf '%s\t%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"
 }
 
+# Validate the complete database artifact that will be put in an archive. This
+# is intentionally independent of a dump command's exit status: a process can
+# be interrupted after writing a plausible-looking prefix, or its output can be
+# truncated by a full filesystem.
+postgres_backup_looks_restorable() {
+    local temp_dir="$1"
+    local expected_database="$2"
+    local layout=""
+    layout=$(pg_backup_layout "$temp_dir")
+
+    if [ "$layout" = "single" ]; then
+        postgres_dump_looks_restorable "$temp_dir/db_backup.sql"
+        return
+    fi
+    [ "$layout" = "multi" ] || return 1
+
+    local dump_dir="$temp_dir/pg_dump"
+    local manifest="$dump_dir/manifest.tsv"
+    postgres_globals_dump_looks_complete "$dump_dir/globals.sql" || return 1
+    [ -s "$manifest" ] || return 1
+
+    local manifest_line=""
+    local dbname=""
+    local has_timescaledb=""
+    local filename=""
+    local field_count=0
+    local manifest_count=0
+    local expected_found=false
+    while IFS= read -r manifest_line || [ -n "$manifest_line" ]; do
+        [ -n "$manifest_line" ] || return 1
+        field_count=$(awk -F '\t' '{ print NF }' <<<"$manifest_line")
+        [ "$field_count" -ge 4 ] && [ "$field_count" -le 5 ] || return 1
+
+        dbname="${manifest_line%%$'\t'*}"
+        has_timescaledb=$(cut -f3 <<<"$manifest_line")
+        filename=$(cut -f4 <<<"$manifest_line")
+        [ -n "$dbname" ] || return 1
+        [[ "$has_timescaledb" =~ ^[01]$ ]] || return 1
+        [[ "$filename" =~ ^db-[0-9]{3}\.sql$ ]] || return 1
+        postgres_dump_looks_restorable "$dump_dir/$filename" || return 1
+
+        manifest_count=$((manifest_count + 1))
+        if [ "$dbname" = "$expected_database" ]; then
+            expected_found=true
+        fi
+    done <"$manifest"
+
+    local dump_count=0
+    dump_count=$(find "$dump_dir" -maxdepth 1 -type f -name 'db-[0-9][0-9][0-9].sql' | wc -l | awk '{ print $1 }')
+    [ "$manifest_count" -gt 0 ] && [ "$dump_count" -eq "$manifest_count" ] && [ "$expected_found" = true ]
+}
+
+# Validate that an SQLite snapshot file is non-empty and passes SQLite quick_check integrity.
+sqlite_snapshot_looks_restorable() {
+    local snapshot_file="$1"
+    [ -s "$snapshot_file" ] || return 1
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+
+    local integrity=""
+    integrity=$(sqlite3 "$snapshot_file" 'PRAGMA quick_check;' 2>/dev/null) || return 1
+    [ "$integrity" = "ok" ]
+}
+
+# Dispatcher to validate database backup restorable integrity for any supported engine.
+database_backup_looks_restorable() {
+    local db_type="$1"
+    local temp_dir="$2"
+    local expected_database="${3:-}"
+    local sqlite_file="${4:-}"
+
+    case "$db_type" in
+        mysql | mariadb)
+            mysql_dump_looks_restorable "$temp_dir/db_backup.sql"
+            ;;
+        postgresql | timescaledb)
+            postgres_backup_looks_restorable "$temp_dir" "$expected_database"
+            ;;
+        sqlite)
+            [ -n "$sqlite_file" ] || return 1
+            sqlite_snapshot_looks_restorable "$temp_dir/$(basename "$sqlite_file")"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Upload completed backup archive(s) to configured Telegram chat, supporting multipart archives.
 send_backup_to_telegram() {
+    local requested_timestamp="${1:-}"
+
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
             if [[ -z "$key" || "$key" =~ ^# ]]; then
@@ -195,9 +288,19 @@ send_backup_to_telegram() {
     fi
     local backup_dir="$APP_DIR/backup"
     local latest_backup=""
-    latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
-        \( -name 'backup_*.tar.gz' -o -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) \
-        -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    if [ -n "$requested_timestamp" ]; then
+        if [[ ! "$requested_timestamp" =~ ^[0-9]{14}$ ]]; then
+            colorized_echo red "Invalid backup timestamp requested for upload."
+            return 1
+        fi
+        latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
+            \( -name "backup_${requested_timestamp}.zip" -o -name "backup_${requested_timestamp}.z[0-9][0-9]" -o -name "backup_${requested_timestamp}.part[0-9][0-9].zip" \) \
+            -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    else
+        latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
+            \( -name 'backup_*.tar.gz' -o -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) \
+            -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    fi
 
     if [ -z "$latest_backup" ]; then
         colorized_echo red "No backups found to send."
@@ -350,6 +453,7 @@ send_backup_to_telegram() {
     fi
 }
 
+# Send error notification and execution log to Telegram chat upon backup failure.
 send_backup_error_to_telegram() {
     local error_messages=$1
     local log_file=$2
@@ -403,6 +507,7 @@ send_backup_error_to_telegram() {
     fi
 }
 
+# Interactive configuration wizard for scheduled automated Telegram backups.
 backup_service() {
     local telegram_bot_key=""
     local telegram_chat_id=""
@@ -599,6 +704,7 @@ backup_service() {
     colorized_echo green "====================================="
 }
 
+# Add or update the PasarGuard backup service entry in system crontab.
 add_cron_job() {
     local schedule="$1"
     local command="$2"
@@ -618,6 +724,7 @@ add_cron_job() {
     rm -f "$temp_cron"
 }
 
+# Display current configuration details of the automated backup service.
 view_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -656,6 +763,7 @@ view_backup_service() {
     read -p "Press Enter to continue..."
 }
 
+# Interactive editor for existing automated backup service settings.
 edit_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -817,6 +925,7 @@ edit_backup_service() {
     colorized_echo green "Backup service configuration updated successfully."
 }
 
+# Disable and completely remove automated backup service configuration and cron task.
 remove_backup_service() {
     colorized_echo red "in process..."
 
@@ -851,14 +960,17 @@ remove_backup_service() {
 # PostgreSQL/TimescaleDB container into <temp_dir>/pg_dump/.
 # Layout: globals.sql, db-NNN.sql per database, manifest.tsv
 # (dbname<TAB>owner<TAB>has_timescaledb<TAB>filename<TAB>ts_version).
-# Returns 0 when at least one database was dumped; otherwise removes the
-# pg_dump dir and returns 1 so the caller can fall back to single-database mode.
+# The configured application database is passed as argument 6. Returns 0 only
+# when every enumerated database was dumped and that application database is in
+# the manifest; otherwise removes the pg_dump directory and returns 1 so the
+# caller can fall back to a validated single-database dump.
 pg_dump_all_user_databases() {
     local container_name="$1"
     local backup_user="$2"
     local backup_password="$3"
     local temp_dir="$4"
     local log_file="$5"
+    local expected_database="$6"
 
     local out_dir="$temp_dir/pg_dump"
     local manifest="$out_dir/manifest.tsv"
@@ -871,13 +983,22 @@ pg_dump_all_user_databases() {
         rm -rf "$out_dir"
         return 1
     fi
+    if ! postgres_globals_dump_looks_complete "$out_dir/globals.sql"; then
+        echo "pg_dumpall globals output failed completion validation" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
 
     # Enumerate real user databases (skip templates and the postgres maintenance DB).
     local databases=""
-    databases=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+    if ! databases=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
         psql -U "$backup_user" -d postgres -At \
         -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres';" \
-        2>>"$log_file")
+        2>>"$log_file"); then
+        echo "Could not enumerate user databases for multi-DB backup" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
     if [ -z "$databases" ]; then
         echo "No user databases enumerated for multi-DB backup" >>"$log_file"
         rm -rf "$out_dir"
@@ -887,6 +1008,7 @@ pg_dump_all_user_databases() {
     : >"$manifest"
     local index=0
     local dumped=0
+    local expected_found=false
     local dbname=""
     while IFS= read -r dbname; do
         [ -n "$dbname" ] || continue
@@ -894,15 +1016,17 @@ pg_dump_all_user_databases() {
         local filename
         filename=$(pg_dump_index_filename "$index")
 
-        # Owner of this database (empty if it can't be determined; restore
-        # falls back to the admin role).
+        # Owner of this database. If it cannot be determined, the manifest
+        # would be incomplete, so abort and let the caller fall back to a
+        # validated single-database dump.
         local owner=""
         if ! owner=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             psql -U "$backup_user" -d postgres -At \
             -c "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${dbname//\'/\'\'}';" \
             2>>"$log_file") || [ -z "$owner" ]; then
-            echo "Could not determine owner for database '$dbname'; restore will fall back to the admin role" >>"$log_file"
-            owner=""
+            echo "Could not determine owner for database '$dbname'; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # TimescaleDB presence + version for this database. One query gives both:
@@ -921,41 +1045,85 @@ pg_dump_all_user_databases() {
                 ts_version="$ext_check"
             fi
         else
-            echo "Could not check timescaledb extension for database '$dbname'; assuming not present" >>"$log_file"
+            echo "Could not check timescaledb extension for database '$dbname'; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # Dump this database.
         if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             pg_dump -U "$backup_user" -d "$dbname" --clean --if-exists >"$out_dir/$filename" 2>>"$log_file"; then
             echo "pg_dump failed for database '$dbname'" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # Never trust an empty/garbage dump.
         if ! postgres_dump_looks_restorable "$out_dir/$filename"; then
-            echo "Dump for database '$dbname' failed content validation; skipping" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            echo "Dump for database '$dbname' failed completion/content validation" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         local line
         if ! line=$(pg_manifest_encode "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"); then
-            echo "Database name '$dbname' is not manifest-safe; skipping" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            echo "Database name '$dbname' is not manifest-safe; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
         printf '%s\n' "$line" >>"$manifest"
         dumped=$((dumped + 1))
+        if [ "$dbname" = "$expected_database" ]; then
+            expected_found=true
+        fi
     done <<<"$databases"
 
-    if [ "$dumped" -eq 0 ]; then
+    if [ "$dumped" -eq 0 ] || [ "$dumped" -ne "$index" ] || [ "$expected_found" != true ]; then
+        echo "Multi-DB backup did not include every database and the configured database '$expected_database'" >>"$log_file"
         rm -rf "$out_dir"
         return 1
     fi
     return 0
 }
 
+# Record the extension version beside a legacy single-database TimescaleDB
+# dump. pg_dump itself does not preserve which extension version must be
+# created first, so this small sidecar is required for automatic cross-version
+# restore when the all-databases layout is unavailable.
+write_timescaledb_single_dump_version() {
+    local container_name="$1"
+    local backup_user="$2"
+    local backup_password="$3"
+    local database_name="$4"
+    local temp_dir="$5"
+    local log_file="$6"
+    local source_version=""
+
+    if ! source_version=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        psql -X -U "$backup_user" -d "$database_name" -At \
+        -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';" \
+        2>>"$log_file"); then
+        echo "Could not query TimescaleDB version for single-database dump" >>"$log_file"
+        return 1
+    fi
+
+    if [ -z "$source_version" ]; then
+        # The compose image can be TimescaleDB while this particular database
+        # does not use the extension. Preserve that fact so restore can use the
+        # normal PostgreSQL path instead of requiring a fake version.
+        printf '%s\n' 'none' >"$temp_dir/db_backup.timescaledb-version"
+        return 0
+    fi
+
+    if [[ ! "$source_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]; then
+        echo "Could not record TimescaleDB version for single-database dump" >>"$log_file"
+        return 1
+    fi
+
+    printf '%s\n' "$source_version" >"$temp_dir/db_backup.timescaledb-version"
+}
+
+# Execute a complete PasarGuard system backup including database dumps, configuration, and data.
 backup_command() {
     colorized_echo blue "Starting backup process..."
 
@@ -974,6 +1142,7 @@ backup_command() {
     local split_threshold_bytes="${BACKUP_SPLIT_THRESHOLD_BYTES:-$split_size_bytes}"
     local staging_root=""
     local temp_dir=""
+    local sqlite_snapshot_dir=""
     local log_file=""
     # Keep the lock with the backup artifacts so it is not affected by sticky-dir
     # protections on /tmp when different users invoke the command.
@@ -1004,6 +1173,7 @@ backup_command() {
         return 1
     fi
 
+    # Acquire an exclusive directory-based lock to ensure only one backup runs at a time.
     acquire_backup_lock() {
         local lock_pid=""
 
@@ -1051,8 +1221,12 @@ backup_command() {
         ;;
     esac
 
+    # Clean up temporary staging directories, snapshot files, and release the backup lock.
     cleanup_backup_command() {
         rm -rf "$temp_dir"
+        if [ -n "$sqlite_snapshot_dir" ]; then
+            rm -rf "$sqlite_snapshot_dir"
+        fi
         if [ "$keep_log_file" != true ] && [ -n "$log_file" ]; then
             rm -f "$log_file"
         fi
@@ -1130,26 +1304,11 @@ backup_command() {
 
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
-        db_type="sqlite"
-            # Extract SQLite file path
-            # SQLite URLs: sqlite:///relative/path or sqlite:////absolute/path
-            local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
-            sqlite_url_part="${sqlite_url_part%%\?*}"
-            sqlite_url_part="${sqlite_url_part%%#*}"
-
-            # SQLite URL format:
-            # sqlite:////absolute/path (4 slashes = absolute path /path)
-            # After removing 'sqlite://', //absolute/path remains, convert to /absolute/path
-            if [[ "$sqlite_url_part" =~ ^//(.*)$ ]]; then
-                # Absolute path: sqlite:////absolute/path -> /absolute/path
-                sqlite_file="/${BASH_REMATCH[1]}"
-            elif [[ "$sqlite_url_part" =~ ^/(.*)$ ]]; then
-                # Could be absolute (sqlite:///path) or relative depending on context
-                # In practice, treat as absolute since SQLAlchemy uses 4 slashes for absolute
-                sqlite_file="/${BASH_REMATCH[1]}"
-            else
-                # Relative path (no leading slash)
-                sqlite_file="$sqlite_url_part"
+            db_type="sqlite"
+            if ! sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL") || [ -z "$sqlite_file" ]; then
+                sqlite_file=""
+                echo "Invalid SQLite SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
+                error_messages+=("SQLite database URL is malformed; expected sqlite[+driver]:// followed by a database path.")
             fi
         elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
             # Extract scheme to determine type
@@ -1204,6 +1363,7 @@ backup_command() {
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
 
+                # Decode percent-encoded characters and plus signs into standard text.
                 urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
                 db_user=$(urldecode "$db_user")
                 db_password=$(urldecode "$db_password")
@@ -1251,11 +1411,23 @@ backup_command() {
                 # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
-                    if docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    local mariadb_databases=""
+                    local configured_db_found=false
+                    mariadb_databases=$(docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" \
+                        mariadb -N -s -u root -e "SHOW DATABASES;" 2>>"$log_file") || mariadb_databases=""
+                    while IFS= read -r _db_line; do
+                        [ -n "$_db_line" ] || continue
+                        if [ "$_db_line" = "$db_name" ]; then
+                            configured_db_found=true
+                            break
+                        fi
+                    done <<<"$mariadb_databases"
+
+                    if [ "$configured_db_found" = true ] && docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "MariaDB backup completed successfully (all databases)"
                     else
                         # Fallback to SQL URL credentials for specific database
-                        colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                        colorized_echo yellow "Root backup failed or did not include '$db_name'; falling back to app user for the configured database"
                         local backup_user="${db_user:-${DB_USER:-}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
 
@@ -1339,11 +1511,17 @@ backup_command() {
                                 # Collect DB names into an array so each is passed as one argument
                                 # (a name containing a space must not be word-split).
                                 local -a database_list=()
+                                local configured_db_found=false
                                 while IFS= read -r _db_line; do
-                                    [ -n "$_db_line" ] && database_list+=("$_db_line")
+                                    if [ -n "$_db_line" ]; then
+                                        database_list+=("$_db_line")
+                                        if [ "$_db_line" = "$db_name" ]; then
+                                            configured_db_found=true
+                                        fi
+                                    fi
                                 done <<<"$databases"
-                        if [ -z "$databases" ]; then
-                            colorized_echo yellow "No user databases found, falling back to specific database backup"
+                        if [ -z "$databases" ] || [ "$configured_db_found" != true ]; then
+                            colorized_echo yellow "The configured database '$db_name' was not found in the root database list; falling back to a specific database backup"
                             # Fallback to SQL URL credentials
                             local backup_user="${db_user:-${DB_USER:-}}"
                             local backup_password="${db_password:-${DB_PASSWORD:-}}"
@@ -1441,7 +1619,7 @@ backup_command() {
                             error_messages+=("PostgreSQL database name not found.")
                         else
                             colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using user: $backup_user)"
-                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file" "$db_name"; then
                                 colorized_echo green "PostgreSQL backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
@@ -1512,13 +1690,16 @@ backup_command() {
                             error_messages+=("TimescaleDB database name not found.")
                         else
                             colorized_echo blue "Backing up all TimescaleDB databases from container: $container_name (using user: $backup_user)"
-                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file" "$db_name"; then
                                 colorized_echo green "TimescaleDB backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
                                 if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                     colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
                                     error_messages+=("TimescaleDB dump failed for database '$db_name'.")
+                                elif ! write_timescaledb_single_dump_version "$container_name" "$backup_user" "$backup_password" "$db_name" "$temp_dir" "$log_file"; then
+                                    colorized_echo red "TimescaleDB version metadata could not be created."
+                                    error_messages+=("TimescaleDB version metadata could not be created for '$db_name'.")
                                 else
                                     colorized_echo green "TimescaleDB backup completed successfully"
                                 fi
@@ -1533,7 +1714,10 @@ backup_command() {
             fi
             ;;
         sqlite)
-            if [ -f "$sqlite_file" ]; then
+            if [ -z "$sqlite_file" ]; then
+                # URL parsing already recorded the actionable error above.
+                :
+            elif [ -f "$sqlite_file" ]; then
                 if ! command -v sqlite3 >/dev/null 2>&1; then
                     detect_os
                     # Best-effort: if sqlite3 can't be installed, continue (the
@@ -1544,11 +1728,13 @@ backup_command() {
 
                 local sqlite_basename=$(basename "$sqlite_file")
                 if command -v sqlite3 >/dev/null 2>&1; then
-                    if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
+                    if ! sqlite_snapshot_dir=$(mktemp -d "${staging_root}/pasarguard_sqlite_snapshot.XXXXXX"); then
+                        error_messages+=("Failed to create protected SQLite snapshot staging directory.")
+                    elif ! sqlite3 "$sqlite_file" ".backup '$sqlite_snapshot_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
                         error_messages+=("Failed to create SQLite backup snapshot.")
                     fi
-                elif ! cp "$sqlite_file" "$temp_dir/$sqlite_basename" 2>>"$log_file"; then
-                    error_messages+=("Failed to copy SQLite database.")
+                else
+                    error_messages+=("sqlite3 is required to create a consistent SQLite backup snapshot.")
                 fi
             else
                 error_messages+=("SQLite database file not found at $sqlite_file.")
@@ -1563,8 +1749,32 @@ backup_command() {
 
     colorized_echo blue "Copying app directory..."
     if [ -d "$APP_DIR" ]; then
-        # Use rsync to copy the entire app directory, excluding the backup folder
-        if ! rsync -av --exclude 'backup' "$APP_DIR/" "$temp_dir/" >>"$log_file" 2>&1; then
+        # Database artifacts are staged before app files. Old restore versions
+        # could leave dumps in APP_DIR; copying those over staging would replace
+        # today's fresh dump with a complete-but-stale dump that still passes
+        # structural validation.
+        local app_rsync_args=(
+            -av
+            --exclude 'backup'
+            --exclude 'db_backup.sql'
+            --exclude 'db_backup.sqlite'
+            --exclude 'db_backup.timescaledb-version'
+            --exclude 'pg_dump'
+            --exclude '.pasarguard-destination-compose.yml'
+            --exclude 'pasarguard_ts_compat.*'
+            --exclude '*_combined.zip'
+            --exclude 'pasarguard_env_cleaned'
+            --exclude 'pasarguard_restore_error.log'
+        )
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
+            local app_sqlite_basename=""
+            app_sqlite_basename=$(basename "$sqlite_file")
+            app_rsync_args+=(--exclude "$app_sqlite_basename")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-wal")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-shm")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-journal")
+        fi
+        if ! rsync "${app_rsync_args[@]}" "$APP_DIR/" "$temp_dir/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy app directory.")
             echo "Failed to copy app directory" >>"$log_file"
         fi
@@ -1582,23 +1792,27 @@ backup_command() {
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
         local rsync_args=(-av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb')
+        local normalized_data_dir=""
+        normalized_data_dir=$(normalize_posix_path "$DATA_DIR")
 
-        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
-            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$normalized_data_dir/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#"$normalized_data_dir"/}"
             rsync_args+=(--exclude "$sqlite_relative_path")
             rsync_args+=(--exclude "${sqlite_relative_path}-wal")
             rsync_args+=(--exclude "${sqlite_relative_path}-shm")
+            rsync_args+=(--exclude "${sqlite_relative_path}-journal")
             echo "Excluding SQLite database from data directory copy: $sqlite_relative_path" >>"$log_file"
         fi
 
         if ! rsync "${rsync_args[@]}" "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy data directory.")
             echo "Failed to copy data directory" >>"$log_file"
-        elif [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
-            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+        elif [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$normalized_data_dir/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#"$normalized_data_dir"/}"
             rm -f "$temp_dir/pasarguard_data/$sqlite_relative_path" \
                 "$temp_dir/pasarguard_data/${sqlite_relative_path}-wal" \
-                "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" 2>>"$log_file" || true
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" \
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-journal" 2>>"$log_file" || true
         fi
     else
         colorized_echo yellow "Data directory $DATA_DIR does not exist. Skipping data directory backup."
@@ -1618,9 +1832,35 @@ backup_command() {
         fi
     fi
 
+    # Refuse to archive a database artifact unless the final staged copy is
+    # complete and contains the configured application database. Keep this
+    # gate after app/data copying because those operations also write into the
+    # staging directory and must not replace an already-validated artifact.
+    if [ -n "$db_type" ] && [ ${#error_messages[@]} -eq 0 ]; then
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
+            local final_sqlite_basename=""
+            final_sqlite_basename=$(basename "$sqlite_file")
+            if [ -z "$sqlite_snapshot_dir" ] || [ ! -f "$sqlite_snapshot_dir/$final_sqlite_basename" ]; then
+                error_messages+=("Protected SQLite snapshot is missing before final archive staging.")
+            elif ! mv -f "$sqlite_snapshot_dir/$final_sqlite_basename" "$temp_dir/$final_sqlite_basename" 2>>"$log_file"; then
+                error_messages+=("Failed to move the protected SQLite snapshot into final archive staging.")
+            fi
+            rm -f "$temp_dir/${final_sqlite_basename}-wal" \
+                "$temp_dir/${final_sqlite_basename}-shm" \
+                "$temp_dir/${final_sqlite_basename}-journal" 2>>"$log_file" || true
+        fi
+        if [ ${#error_messages[@]} -eq 0 ] && ! database_backup_looks_restorable "$db_type" "$temp_dir" "$db_name" "$sqlite_file"; then
+            colorized_echo red "Database backup artifact failed completeness validation."
+            echo "Final staged database artifact failed completeness validation for $db_type" >>"$log_file"
+            error_messages+=("$db_type backup artifact is missing, truncated, corrupt, or does not contain the configured database.")
+        fi
+    fi
+
     colorized_echo blue "Creating backup archive..."
     # Verify temp_dir exists and has content before creating archive
-    if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
+    if [ ${#error_messages[@]} -gt 0 ]; then
+        echo "Skipping archive creation because the backup has errors." >>"$log_file"
+    elif [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
     elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
@@ -1683,6 +1923,10 @@ backup_command() {
     fi
 
     if [ ${#error_messages[@]} -gt 0 ]; then
+        rm -f "$backup_file"
+        find "$backup_dir" -maxdepth 1 -type f \
+            \( -name "backup_${timestamp}.z[0-9][0-9]" -o -name "backup_${timestamp}.part[0-9][0-9].zip" \) \
+            -delete 2>/dev/null || true
         keep_log_file=true
         colorized_echo red "Backup completed with errors:"
         for error in "${error_messages[@]}"; do
@@ -1712,7 +1956,7 @@ backup_command() {
         done
     fi
     if [ -f "$ENV_FILE" ]; then
-        send_backup_to_telegram "$backup_file"
+        send_backup_to_telegram "$timestamp"
     fi
     cleanup_backup_command
 }

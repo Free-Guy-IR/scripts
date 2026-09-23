@@ -23,19 +23,24 @@ source "$ROOT_DIR/pg-node.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
 }
 
+# Assert that the given command evaluates to true (zero exit status).
 assert_true() {
     local label="$1"; shift
     if "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert that the given command evaluates to false (nonzero exit status).
 assert_false() {
     local label="$1"; shift
     if ! "$@"; then pass "$label"; else fail "$label"; fi
@@ -110,8 +115,11 @@ assert_false "validate_app_name: too long"          validate_app_name "$(printf 
 # -----------------------------------------------------------------------
 # generate_uuid_v4
 # -----------------------------------------------------------------------
+# Mock cat to simulate unavailable /proc/sys/kernel/random/uuid.
 cat() { return 1; }
+# Mock uuidgen to simulate unavailable uuidgen binary.
 uuidgen() { return 1; }
+# Mock python3 to return a fixed UUID string.
 python3() {
     if [ "${1:-}" = "-c" ]; then
         echo "11111111-2222-4333-8444-555555555555"
@@ -127,6 +135,7 @@ unset -f cat uuidgen python3
 # -----------------------------------------------------------------------
 # openssl_supports_addext
 # -----------------------------------------------------------------------
+# Mock openssl to report -addext support in req -help.
 openssl() {
     if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
         echo "Usage: openssl req [-addext ext]"
@@ -137,6 +146,7 @@ openssl() {
 export -f openssl
 assert_true "openssl_supports_addext: detects -addext support" openssl_supports_addext
 
+# Mock openssl to report lack of -addext support in req -help.
 openssl() {
     if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
         echo "Usage: openssl req"
@@ -191,6 +201,7 @@ export -f uname
 assert_eq "$(detect_node_serviced_platform)" "Linux_x86_64" \
     "detect_node_serviced_platform: identifies x86_64"
 
+# Mock uname to simulate Linux aarch64 architecture.
 uname() {
     case "${1:-}" in
         -s) echo "Linux" ;;
@@ -278,6 +289,30 @@ APP_NAME="my-node"
 ENV_FILE="/nonexistent/dir/.env"
 sync_env_ssl_paths
 pass "sync_env_ssl_paths: no crash when ENV_FILE missing"
+
+# -----------------------------------------------------------------------
+# version-script CLI command & completions
+# -----------------------------------------------------------------------
+ver_out=$(pg_node_main version-script)
+if [[ "$ver_out" == *"# Executing pg-node script, commit:"* ]]; then
+    pass "version-script: output contains '# Executing pg-node script, commit:'"
+else
+    fail "version-script: output contains '# Executing pg-node script, commit:'"
+fi
+
+bash_comp_out=$(generate_bash_completion)
+if [[ "$bash_comp_out" == *"version-script"* && "$bash_comp_out" == *"script-version"* ]]; then
+    pass "bash completion: contains version-script and script-version"
+else
+    fail "bash completion: contains version-script and script-version"
+fi
+
+zsh_comp_out=$(generate_zsh_completion)
+if [[ "$zsh_comp_out" == *"version-script"* && "$zsh_comp_out" == *"script-version"* ]]; then
+    pass "zsh completion: contains version-script and script-version"
+else
+    fail "zsh completion: contains version-script and script-version"
+fi
 
 echo ""
 

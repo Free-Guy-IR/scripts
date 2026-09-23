@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
 SCRIPT_DIR="${PG_NODE_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
 REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh"
@@ -168,17 +169,22 @@ FETCH_REPO="Free-Guy-IR/scripts"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
+# Configure service paths based on APP_NAME.
 set_service_paths() {
     SERVICE_NAME="${APP_NAME}-service"
     SERVICE_BINARY_PATH="/usr/local/bin/${SERVICE_NAME}"
     SERVICE_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 }
+
+# Require systemd (systemctl) on the system.
 require_systemd() {
     if ! command -v systemctl >/dev/null 2>&1; then
         colorized_echo red "systemd is required to manage the service (systemctl not found)."
         exit 1
     fi
 }
+
+# Check if the node systemd service is installed.
 service_installed() {
     if ! command -v systemctl >/dev/null 2>&1; then
         return 1
@@ -189,6 +195,8 @@ service_installed() {
     fi
     return 1
 }
+
+# Restart the node systemd service if currently installed.
 restart_service_if_installed() {
     if ! service_installed; then
         return
@@ -200,6 +208,8 @@ restart_service_if_installed() {
     systemctl restart "$SERVICE_NAME"
     colorized_echo blue "$SERVICE_NAME service restarted."
 }
+
+# Update and restart the node systemd service if currently installed.
 update_service_if_installed() {
     if ! service_installed; then
         return
@@ -213,6 +223,8 @@ update_service_if_installed() {
     systemctl restart "$SERVICE_NAME"
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 }
+
+# Detect system platform architecture string for node-serviced releases.
 detect_node_serviced_platform() {
     local arch os platform
     os=$(uname -s 2>/dev/null || echo "")
@@ -241,13 +253,18 @@ detect_node_serviced_platform() {
     esac
     echo "$platform"
 }
+
+# Display firewall hints for opening a given port and protocol.
 configure_firewall_for_port() {
     local port="$1"
     local proto="${2:-tcp}"
     local hint="If a firewall is enabled (e.g., UFW or firewalld), allow ${port}/${proto}."
     colorized_echo yellow "$hint"
 }
+
+# Download and install the pg-node CLI script to /usr/local/bin.
 install_node_script() {
+    print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA" "install"
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
     TEMP_FILE=$(create_temp_file "pg-node-script" ".sh")
@@ -286,6 +303,8 @@ install_node_script() {
         exit 1
     fi
 }
+
+# Download and install the node-serviced binary release from GitHub.
 install_node_service_script() {
     set_service_paths
     if ! command -v jq >/dev/null 2>&1; then
@@ -404,6 +423,7 @@ normalize_san_entry() {
     echo "$normalized"
 }
 
+# Validate a Subject Alternative Name (SAN) entry for certificate generation.
 validate_san_entry() {
     local entry="$1"
     # Remove leading/trailing whitespace
@@ -426,6 +446,7 @@ validate_san_entry() {
     fi
 }
 
+# Generate a random UUID v4 using available system tools.
 generate_uuid_v4() {
     cat /proc/sys/kernel/random/uuid 2>/dev/null ||
         uuidgen 2>/dev/null ||
@@ -433,10 +454,12 @@ generate_uuid_v4() {
         python -c "import uuid; print(uuid.uuid4())" 2>/dev/null
 }
 
+# Check if the installed openssl binary supports the -addext option.
 openssl_supports_addext() {
     openssl req -help 2>&1 | grep -q -- '-addext'
 }
 
+# Generate an EC self-signed certificate using openssl -addext.
 generate_self_signed_cert_with_addext() {
     local san_string="$1"
 
@@ -448,6 +471,7 @@ generate_self_signed_cert_with_addext() {
         -addext "subjectAltName = $san_string" >/dev/null 2>&1
 }
 
+# Generate an EC self-signed certificate using a temporary openssl config file.
 generate_self_signed_cert_with_config() {
     local san_string="$1"
     local openssl_config=""
@@ -478,6 +502,7 @@ generate_self_signed_cert_with_config() {
     return "$status"
 }
 
+# Generate a self-signed SSL/TLS certificate with Subject Alternative Names (SANs).
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
     local extra_san=""
@@ -662,6 +687,7 @@ gen_self_signed_cert() {
         exit 1
     fi
 }
+# Read multiline content or copy a file path into a target file.
 read_and_save_file() {
     local prompt_message=$1
     local output_file=$2
@@ -684,6 +710,8 @@ read_and_save_file() {
         echo "$line" >>"$output_file"
     done
 }
+
+# Download compose files, set up certificates, configure .env, and deploy the node.
 install_node() {
     local node_version=$1
     FILES_URL_PREFIX="https://raw.githubusercontent.com/Free-Guy-IR/node/main"
@@ -869,12 +897,15 @@ install_node() {
     sync_env_ssl_paths
     colorized_echo green "✓ docker-compose.yml modified successfully"
 }
+# Remove the pg-node script from /usr/local/bin.
 uninstall_node_script() {
     if [ -f "/usr/local/bin/$APP_NAME" ]; then
         colorized_echo yellow "Removing node script"
         rm "/usr/local/bin/$APP_NAME"
     fi
 }
+
+# Remove the node-serviced binary from /usr/local/bin.
 uninstall_node_service_script() {
     set_service_paths
     if [ -f "$SERVICE_BINARY_PATH" ]; then
@@ -882,12 +913,16 @@ uninstall_node_service_script() {
         rm "$SERVICE_BINARY_PATH"
     fi
 }
+
+# Remove the node application directory.
 uninstall_node() {
     if [ -d "$APP_DIR" ]; then
         colorized_echo yellow "Removing directory: $APP_DIR"
         rm -r "$APP_DIR"
     fi
 }
+
+# Remove unused pasarguard/node Docker images.
 uninstall_node_docker_images() {
     local images
     images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^ghcr\.io\/free-guy-ir\/node(:|$)/ {print $2}' | sort -u)
@@ -914,6 +949,8 @@ uninstall_node_docker_images() {
         fi
     done
 }
+
+# Remove the node data and certificates directory.
 uninstall_node_data_files() {
     if [ -d "$DATA_DIR" ]; then
         colorized_echo yellow "Removing directory: $DATA_DIR"
@@ -1025,18 +1062,27 @@ l2tp_enable_command() {
     fi
 }
 
+# Start node Docker Compose services in background.
 up_node() {
     compose_up
 }
+
+# Stop and remove node Docker Compose containers.
 down_node() {
     compose_down
 }
+
+# Display node Docker Compose logs without following.
 show_node_logs() {
     compose_logs
 }
+
+# Follow node Docker Compose logs in real time.
 follow_node_logs() {
     compose_logs_follow
 }
+
+# Update shared libraries and the node script from the remote repository.
 update_node_script() {
     colorized_echo blue "Updating node script"
 
@@ -1060,9 +1106,13 @@ update_node_script() {
     cleanup_backup "$backup_dir"
     colorized_echo green "node script updated successfully"
 }
+
+# Pull latest Docker images for the node services.
 update_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
 }
+
+# Check if node application directory exists.
 is_node_installed() {
     if [ -d $APP_DIR ]; then
         return 0
@@ -1070,12 +1120,16 @@ is_node_installed() {
         return 1
     fi
 }
+
+# Verify that the environment file exists.
 ensure_env_exists() {
     if [ ! -f "$ENV_FILE" ]; then
         colorized_echo red "Environment file not found at $ENV_FILE. Please install the node first."
         exit 1
     fi
 }
+
+# Synchronize SSL certificate and key paths in .env with custom APP_NAME.
 sync_env_ssl_paths() {
     # Adjust SSL_CERT_FILE/SSL_KEY_FILE in .env if a custom APP_NAME still points to the default pg-node path
     if [ "$APP_NAME" = "pg-node" ]; then
@@ -1103,6 +1157,8 @@ sync_env_ssl_paths() {
         colorized_echo cyan "Updated SSL file paths in $ENV_FILE to match APP_NAME ($APP_NAME)."
     fi
 }
+
+# Check if node Docker containers are created or running.
 is_node_up() {
     if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
         return 1
@@ -1110,8 +1166,11 @@ is_node_up() {
         return 0
     fi
 }
+
+# Execute node installation workflow with option parsing and setup.
 install_command() {
     check_running_as_root
+    print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA" "install"
     # Default values
     node_version="latest"
     node_version_set="false"
@@ -1301,6 +1360,7 @@ install_command() {
     colorized_echo magenta "Next, use the API Key (UUID v4) in pasarguard Panel: "
     colorized_echo red "${API_KEY}"
 }
+# Uninstall node containers, configuration, scripts, and optionally data directories.
 uninstall_command() {
     check_running_as_root
     # Check if  node is installed
@@ -1340,7 +1400,10 @@ uninstall_command() {
         colorized_echo green "node uninstalled successfully"
     fi
 }
+
+# Start node services and optionally stream container logs.
 up_command() {
+    # Display help message for up command options.
     help() {
         colorized_echo red "Usage: node up [options]"
         echo ""
@@ -1381,6 +1444,8 @@ up_command() {
         follow_node_logs
     fi
 }
+
+# Stop running node services.
 down_command() {
     # Check if node is installed
     if ! is_node_installed; then
@@ -1394,7 +1459,10 @@ down_command() {
     fi
     down_node
 }
+
+# Restart node services and restart systemd service if present.
 restart_command() {
+    # Display help message for restart command options.
     help() {
         colorized_echo red "Usage: node restart [options]"
         echo
@@ -1444,6 +1512,8 @@ restart_command() {
         follow_node_logs
     fi
 }
+
+# Configure, install, and start the node systemd service unit.
 install_service_command() {
     check_running_as_root
     require_systemd
@@ -1554,6 +1624,8 @@ EOF
     systemctl enable --now "$SERVICE_NAME"
     colorized_echo green "$SERVICE_NAME service installed and started."
 }
+
+# Stop, disable, and remove the node systemd service unit.
 uninstall_service_command() {
     check_running_as_root
     require_systemd
@@ -1572,6 +1644,7 @@ uninstall_service_command() {
     colorized_echo green "$SERVICE_NAME service uninstalled."
 }
 
+# Start the node systemd service unit.
 service_start_command() {
     check_running_as_root
     require_systemd
@@ -1582,6 +1655,8 @@ service_start_command() {
     systemctl start "$SERVICE_NAME"
     colorized_echo green "$SERVICE_NAME service started."
 }
+
+# Stop the running node systemd service unit.
 service_stop_command() {
     check_running_as_root
     require_systemd
@@ -1593,6 +1668,7 @@ service_stop_command() {
     colorized_echo green "$SERVICE_NAME service stopped."
 }
 
+# Update the node-serviced binary and restart the systemd service.
 service_update_command() {
     check_running_as_root
     require_systemd
@@ -1606,6 +1682,7 @@ service_update_command() {
     colorized_echo green "$SERVICE_NAME service updated and restarted."
 }
 
+# Display or follow journalctl logs for the node systemd service.
 service_logs_command() {
     require_systemd
     if ! service_installed; then
@@ -1638,6 +1715,7 @@ service_logs_command() {
     fi
 }
 
+# Restart the node systemd service.
 restart_service_command() {
     check_running_as_root
     require_systemd
@@ -1647,6 +1725,8 @@ restart_service_command() {
     fi
     restart_service_if_installed
 }
+
+# Display status of the node systemd service via systemctl.
 status_service_command() {
     require_systemd
     if ! service_installed; then
@@ -1655,6 +1735,8 @@ status_service_command() {
     fi
     systemctl status --no-pager "$SERVICE_NAME"
 }
+
+# Display status and individual container states of the node services.
 status_command() {
     # Check if node is installed
     if ! is_node_installed; then
@@ -1685,7 +1767,10 @@ status_command() {
         fi
     done
 }
+
+# Display or follow Docker Compose logs for the node.
 logs_command() {
+    # Display help message for logs command options.
     help() {
         colorized_echo red "Usage: node logs [options]"
         echo ""
@@ -1727,6 +1812,8 @@ logs_command() {
         follow_node_logs
     fi
 }
+
+# Update node script, completions, container images, and restart services.
 update_command() {
     check_running_as_root
     local no_update_service=false
@@ -1778,6 +1865,7 @@ get_xray_core() {
     # Systemd/non-TTY environments may not have TERM set; ignore clear failures to avoid exiting under set -e
     safe_clear() { clear 2>/dev/null || true; }
     safe_clear
+    # Validate whether a specified Xray-core version exists on GitHub.
     validate_version() {
         local version="$1"
         local response
@@ -1801,6 +1889,7 @@ get_xray_core() {
             echo "valid"
         fi
     }
+    # Display the interactive selection menu for available Xray-core versions.
     print_menu() {
         safe_clear
         echo -e "\033[1;32m==============================\033[0m"
@@ -1885,6 +1974,7 @@ get_xray_core() {
     unzip -o "$xray_filename" >/dev/null 2>&1 || die "Failed to extract $xray_filename"
     rm -f "$xray_filename"
 }
+# Retrieve the currently installed Xray-core version from binary or running container.
 get_current_xray_core_version() {
     XRAY_BINARY="$DATA_DIR/xray-core/xray"
     if [ -f "$XRAY_BINARY" ]; then
@@ -1908,6 +1998,8 @@ get_current_xray_core_version() {
     fi
     echo "Not installed"
 }
+
+# Download, extract, configure, and install a chosen Xray-core binary release.
 update_core_command() {
     check_running_as_root
     local core_version_arg=""
@@ -1960,6 +2052,8 @@ update_core_command() {
     restart_command -n --no-restart-service
     colorized_echo blue "Installation of XRAY-CORE version $selected_version completed."
 }
+
+# Open docker-compose.yml in default editor.
 edit_command() {
     detect_os
     check_editor
@@ -1970,6 +2064,8 @@ edit_command() {
         exit 1
     fi
 }
+
+# Open .env in default editor.
 edit_env_command() {
     detect_os
     check_editor
@@ -1980,6 +2076,8 @@ edit_env_command() {
         exit 1
     fi
 }
+
+# Generate bash auto-completion definition script.
 generate_bash_completion() {
     cat <<'EOF'
 _node_completions()
@@ -1987,7 +2085,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall l2tp-enable install-script uninstall-script core-update geofiles renew-cert edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs install update uninstall l2tp-enable install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1996,6 +2094,7 @@ EOF
     echo "complete -F _node_completions $APP_NAME"
 }
 
+# Generate zsh auto-completion definition script.
 generate_zsh_completion() {
     cat <<EOF
 #compdef $APP_NAME
@@ -2016,6 +2115,8 @@ commands=(
   core-update
   geofiles
   renew-cert
+  version-script
+  script-version
   edit
   edit-env
   completion
@@ -2033,6 +2134,7 @@ _describe 'command' commands
 EOF
 }
 
+# Install bash and zsh completion scripts for the node CLI.
 install_completion() {
     local bash_completion_dir="/etc/bash_completion.d"
     local bash_completion_file="$bash_completion_dir/$APP_NAME"
@@ -2051,6 +2153,8 @@ install_completion() {
     chmod 644 "$zsh_completion_file"
     colorized_echo green "✓ Zsh completion installed to $zsh_completion_file"
 }
+
+# Remove installed bash and zsh completion files.
 uninstall_completion() {
     local bash_completion_dir="/etc/bash_completion.d"
     local bash_completion_file="$bash_completion_dir/$APP_NAME"
@@ -2067,6 +2171,8 @@ uninstall_completion() {
         colorized_echo yellow "Zsh completion removed from $zsh_completion_file"
     fi
 }
+
+# Display help and usage information for pg-node worker node commands and options.
 usage() {
     colorized_echo blue "================================"
     colorized_echo magenta "       $APP_NAME Node CLI Help"
@@ -2103,6 +2209,7 @@ usage() {
     colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
     colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
     colorized_echo yellow "  renew-cert        $(tput sgr0)✓  Regenerate SSL/TLS certificate"
+    colorized_echo yellow "  version-script    $(tput sgr0)✓  Show script version and commit"
     colorized_echo yellow "  completion        $(tput sgr0)✓  Install bash/zsh tab completion"
     echo
     colorized_echo cyan "Restart Options:"
@@ -2136,11 +2243,15 @@ usage() {
     echo
     colorized_echo cyan "Node Information:"
     colorized_echo magenta "  Node IP: $NODE_IP_V4"
-    SERVICE_PORT=$(grep '^SERVICE_PORT[[:space:]]*=' "$APP_DIR/.env" | sed 's/^SERVICE_PORT[[:space:]]*=[[:space:]]*//')
-    colorized_echo magenta "  Service port: $SERVICE_PORT"
+    local service_port=""
+    local api_key=""
+    if [ -f "$APP_DIR/.env" ]; then
+        service_port=$(grep '^SERVICE_PORT[[:space:]]*=' "$APP_DIR/.env" 2>/dev/null | sed 's/^SERVICE_PORT[[:space:]]*=[[:space:]]*//' || true)
+        api_key=$(grep '^API_KEY[[:space:]]*=' "$APP_DIR/.env" 2>/dev/null | sed 's/^API_KEY[[:space:]]*=[[:space:]]*//' || true)
+    fi
+    colorized_echo magenta "  Service port: $service_port"
     colorized_echo magenta "  Cert file path: $SSL_CERT_FILE"
-    API_KEY=$(grep '^API_KEY[[:space:]]*=' "$APP_DIR/.env" | sed 's/^API_KEY[[:space:]]*=[[:space:]]*//')
-    colorized_echo magenta "  API Key : $API_KEY"
+    colorized_echo magenta "  API Key : $api_key"
     echo
     current_version=$(get_current_xray_core_version)
     colorized_echo cyan "Current Xray-core version: " 1 # 1 for bold
@@ -2149,6 +2260,7 @@ usage() {
     colorized_echo blue "================================="
     echo
 }
+# Download regional geoip and geosite rule files and restart node services.
 geofiles_command() {
     check_running_as_root
     mkdir -p "$DATA_DIR/assets"
@@ -2220,6 +2332,7 @@ geofiles_command() {
     fi
 }
 
+# Backup existing certificates and generate a renewed self-signed TLS certificate.
 renew_cert_command() {
     check_running_as_root
     # Check if node is installed
@@ -2321,6 +2434,7 @@ renew_cert_command() {
     restart_command
 }
 
+# Main CLI dispatch handler for pg-node.
 pg_node_main() {
     # Bring existing env SSL paths in line with the current APP_NAME (safe no-op if not installed/default)
     sync_env_ssl_paths
@@ -2407,6 +2521,9 @@ pg_node_main() {
         ;;
     edit-env)
         edit_env_command
+        ;;
+    version-script | script-version)
+        print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA"
         ;;
     completion)
         check_running_as_root

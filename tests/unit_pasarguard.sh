@@ -31,19 +31,24 @@ source "$ROOT_DIR/pasarguard.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert that the given command evaluates to true (zero exit status).
 assert_true() {
     local label="$1"; shift
     if "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert that the given command evaluates to false (nonzero exit status).
 assert_false() {
     local label="$1"; shift
     if ! "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -252,6 +257,126 @@ assert_false "manifest: rejects tab in ts_version"     pg_manifest_encode "db" "
 assert_false "manifest: rejects newline in ts_version" pg_manifest_encode "db" "o" "1" "f.sql" "$(printf '2\n7')"
 
 # -----------------------------------------------------------------------
+# database backup completeness validation
+# -----------------------------------------------------------------------
+DB_VALIDATION_DIR="$WORK_DIR/db-validation"
+mkdir -p "$DB_VALIDATION_DIR"
+
+printf '%s\n' \
+    '-- MySQL dump 10.13  Distrib 8.0.43' \
+    'CREATE TABLE users (id int);' \
+    '-- Dump completed on 2026-08-01 12:00:00' >"$DB_VALIDATION_DIR/db_backup.sql"
+assert_true "backup validation: complete MySQL dump accepted" \
+    database_backup_looks_restorable mysql "$DB_VALIDATION_DIR" appdb ""
+sed -i '$d' "$DB_VALIDATION_DIR/db_backup.sql"
+assert_false "backup validation: truncated MySQL dump rejected" \
+    database_backup_looks_restorable mysql "$DB_VALIDATION_DIR" appdb ""
+
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE public.users (id integer);' \
+    '-- PostgreSQL database dump complete' >"$DB_VALIDATION_DIR/db_backup.sql"
+assert_true "backup validation: complete PostgreSQL single dump accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+sed -i '$d' "$DB_VALIDATION_DIR/db_backup.sql"
+assert_false "backup validation: truncated PostgreSQL single dump rejected" \
+    database_backup_looks_restorable timescaledb "$DB_VALIDATION_DIR" appdb ""
+
+rm -f "$DB_VALIDATION_DIR/db_backup.sql"
+mkdir -p "$DB_VALIDATION_DIR/pg_dump"
+printf '%s\n' \
+    '-- PostgreSQL database cluster dump' \
+    'CREATE ROLE appuser;' \
+    '-- PostgreSQL database cluster dump complete' >"$DB_VALIDATION_DIR/pg_dump/globals.sql"
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE public.users (id integer);' \
+    '-- PostgreSQL database dump complete' >"$DB_VALIDATION_DIR/pg_dump/db-001.sql"
+printf '%s\n' "$(pg_manifest_encode appdb appuser 1 db-001.sql 2.27.2)" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: complete TimescaleDB multi dump accepted" \
+    database_backup_looks_restorable timescaledb "$DB_VALIDATION_DIR" appdb ""
+assert_false "backup validation: configured PostgreSQL database must be present" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" missingdb ""
+printf '%s\n' "$(pg_manifest_encode appdb appuser 0 db-001.sql '')" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: PostgreSQL manifest with empty ts_version accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+printf 'appdb\tappuser\t0\tdb-001.sql\n' >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: legacy 4-field manifest accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+
+SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
+mkdir -p "$SQLITE_VALIDATION_DIR"
+printf 'sqlite fixture\n' >"$SQLITE_VALIDATION_DIR/app.sqlite3"
+# Mock sqlite3 to simulate successful PRAGMA quick_check integrity test.
+sqlite3() {
+    [ "$2" = "PRAGMA quick_check;" ] || return 1
+    printf 'ok\n'
+}
+assert_true "backup validation: SQLite quick_check success accepted" \
+    database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+# Mock sqlite3 to simulate a corrupted database disk image.
+sqlite3() { printf 'database disk image is malformed\n'; }
+assert_false "backup validation: corrupt SQLite snapshot rejected" \
+    database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+unset -f sqlite3
+
+# A multi-database PostgreSQL/TimescaleDB backup must be atomic. Previously the
+# helper returned success as long as any one database dumped successfully.
+MOCK_PG_FAIL_DB=""
+# Mock docker CLI commands for PostgreSQL cluster dump testing.
+docker() {
+    local joined="$*"
+    case "$joined" in
+        *" pg_dumpall "*)
+            printf '%s\n' '-- PostgreSQL database cluster dump' '-- PostgreSQL database cluster dump complete'
+            ;;
+        *"SELECT datname FROM pg_database"*)
+            printf '%s\n' appdb analytics
+            ;;
+        *"pg_get_userbyid"*)
+            printf 'appuser\n'
+            ;;
+        *"SELECT extversion FROM pg_extension"*)
+            return 0
+            ;;
+        *" pg_dump "*)
+            if [ -n "$MOCK_PG_FAIL_DB" ] && [[ "$joined" == *" -d $MOCK_PG_FAIL_DB "* ]]; then
+                return 1
+            fi
+            printf '%s\n' \
+                '-- PostgreSQL database dump' \
+                'CREATE TABLE public.events (id integer);' \
+                '-- PostgreSQL database dump complete'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+PG_ATOMIC_DIR="$WORK_DIR/pg-atomic-success"
+mkdir -p "$PG_ATOMIC_DIR"
+assert_true "pg multi backup: every database plus configured database succeeds" \
+    pg_dump_all_user_databases pg appuser pass "$PG_ATOMIC_DIR" "$WORK_DIR/pg-success.log" appdb
+assert_true "pg multi backup: completed artifact passes final validation" \
+    postgres_backup_looks_restorable "$PG_ATOMIC_DIR" appdb
+
+PG_PARTIAL_DIR="$WORK_DIR/pg-atomic-partial"
+mkdir -p "$PG_PARTIAL_DIR"
+MOCK_PG_FAIL_DB="analytics"
+assert_false "pg multi backup: one failed database fails the whole operation" \
+    pg_dump_all_user_databases pg appuser pass "$PG_PARTIAL_DIR" "$WORK_DIR/pg-partial.log" appdb
+assert_false "pg multi backup: partial dump directory is removed" test -d "$PG_PARTIAL_DIR/pg_dump"
+
+PG_MISSING_DIR="$WORK_DIR/pg-atomic-missing-app"
+mkdir -p "$PG_MISSING_DIR"
+MOCK_PG_FAIL_DB=""
+assert_false "pg multi backup: missing configured database fails the operation" \
+    pg_dump_all_user_databases pg appuser pass "$PG_MISSING_DIR" "$WORK_DIR/pg-missing.log" missingdb
+assert_false "pg multi backup: missing-app dump directory is removed" test -d "$PG_MISSING_DIR/pg_dump"
+unset -f docker
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"
@@ -327,6 +452,24 @@ EOF
 assert_eq "$(detect_pasarguard_backend_service)" "pasarguard" \
     "detect_pasarguard_backend_service: identifies pasarguard as fallback"
 
+# Test start_pasarguard_app_services exit status propagation
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 0
+fi
+EOF
+assert_true "start_pasarguard_app_services: propagates success (exit 0)" start_pasarguard_app_services
+
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 1
+fi
+EOF
+assert_false "start_pasarguard_app_services: propagates failure (exit 1)" start_pasarguard_app_services
+
+
 # -----------------------------------------------------------------------
 # is_port_in_use
 # -----------------------------------------------------------------------
@@ -339,6 +482,7 @@ ss() {
     fi
     return 1
 }
+# Mock netstat to simulate listening network ports.
 netstat() {
     if [[ "${1:-}" == "-lnt" ]]; then
         echo "tcp 0 0 0.0.0.0:55555 0.0.0.0:* LISTEN"
@@ -399,6 +543,58 @@ mkdir -p "$PGL_DIR/pg_dump"
 touch "$PGL_DIR/pg_dump/manifest.tsv"
 assert_eq "$(pg_backup_layout "$PGL_DIR")" "multi"  "layout: manifest present -> multi (precedence)"
 
+SINGLE_TS_DIR="$WORK_DIR/single-timescale"
+mkdir -p "$SINGLE_TS_DIR"
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE metrics (time timestamptz);' \
+    '-- PostgreSQL database dump complete' >"$SINGLE_TS_DIR/db_backup.sql"
+printf '%s\n' '2.27.2' >"$SINGLE_TS_DIR/db_backup.timescaledb-version"
+assert_true "single_ts: versioned dump promoted to manifest" \
+    pg_promote_timescaledb_single_backup "$SINGLE_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$SINGLE_TS_DIR/pg_dump/manifest.tsv")" "2.27.2" "single_ts: source version recorded"
+assert_true "single_ts: promoted artifact validates" postgres_backup_looks_restorable "$SINGLE_TS_DIR" "appdb"
+
+NOEXT_TS_DIR="$WORK_DIR/single-timescale-no-extension"
+mkdir -p "$NOEXT_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$NOEXT_TS_DIR/db_backup.sql"
+printf '%s\n' 'none' >"$NOEXT_TS_DIR/db_backup.timescaledb-version"
+assert_true "single_ts: explicit no-extension dump promoted" \
+    pg_promote_timescaledb_single_backup "$NOEXT_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f3 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "0" "single_ts: no-extension manifest uses PostgreSQL path"
+assert_eq "$(cut -f5 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "" "single_ts: no fake extension version recorded"
+assert_true "single_ts: no-extension artifact validates" postgres_backup_looks_restorable "$NOEXT_TS_DIR" "appdb"
+
+UNVERSIONED_TS_DIR="$WORK_DIR/unversioned-timescale"
+mkdir -p "$UNVERSIONED_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$UNVERSIONED_TS_DIR/db_backup.sql"
+unset TIMESCALEDB_BACKUP_VERSION 2>/dev/null || true
+assert_false "single_ts: unversioned legacy dump fails safely" \
+    pg_promote_timescaledb_single_backup "$UNVERSIONED_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+
+COMPOSE_TS_DIR="$WORK_DIR/compose-timescale"
+mkdir -p "$COMPOSE_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TS_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb:2.11.0-pg14' >"$COMPOSE_TS_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TS_DIR/pg_dump/manifest.tsv")" "2.11.0" "single_ts: source version extracted from compose"
+
+COMPOSE_TSHA_DIR="$WORK_DIR/compose-timescale-ha"
+mkdir -p "$COMPOSE_TSHA_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TSHA_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb-ha:pg16-ts2.13.0-all' >"$COMPOSE_TSHA_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb-ha tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TSHA_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TSHA_DIR/pg_dump/manifest.tsv")" "2.13.0" "single_ts: source version extracted from compose-ha"
+
+
 # -----------------------------------------------------------------------
 # pg_filter_timescaledb_extension_lines
 # -----------------------------------------------------------------------
@@ -411,11 +607,92 @@ _ts_expected=$(printf '%s\n' "CREATE TABLE foo (id int);" "INSERT INTO foo VALUE
 assert_eq "$_ts_out" "$_ts_expected" "ts_filter: removes timescaledb extension lines, keeps rest"
 
 # -----------------------------------------------------------------------
+# pg_filter_global_passwords
+# -----------------------------------------------------------------------
+_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN PASSWORD 'SCRAM-SHA-256\$4096:salt\$stored:server' VALID UNTIL 'infinity';" \
+    "ALTER ROLE disabled PASSWORD NULL NOSUPERUSER;" \
+    "GRANT appuser TO postgres;" | pg_filter_global_passwords)
+_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN VALID UNTIL 'infinity';" \
+    "ALTER ROLE disabled NOSUPERUSER;" \
+    "GRANT appuser TO postgres;")
+assert_eq "$_globals_out" "$_globals_expected" "global_filter: strips password verifiers and keeps role attributes/grants"
+assert_false "global_filter: no PASSWORD keyword remains" grep -qE '[[:space:]]PASSWORD[[:space:]]' <<<"$_globals_out"
+
+_encrypted_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN ENCRYPTED PASSWORD 'SCRAM-SHA-256\$4096:salt\$stored:server' VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN UNENCRYPTED PASSWORD 'plain-pass' NOSUPERUSER;" | pg_filter_global_passwords)
+_encrypted_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN NOSUPERUSER;")
+assert_eq "$_encrypted_globals_out" "$_encrypted_globals_expected" "global_filter: strips ENCRYPTED and UNENCRYPTED password verifiers cleanly"
+assert_false "global_filter: no ENCRYPTED keyword remains" grep -qE '[[:space:]]ENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+assert_false "global_filter: no UNENCRYPTED keyword remains" grep -qE '[[:space:]]UNENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+
+_destination_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH NOSUPERUSER PASSWORD 'old-password';" \
+    "CREATE ROLE worker;" \
+    "ALTER ROLE worker WITH LOGIN PASSWORD 'worker-password';" \
+    "GRANT worker TO appuser;" | pg_filter_globals_for_destination "appuser")
+_destination_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE worker;" \
+    "ALTER ROLE worker WITH LOGIN;" \
+    "GRANT worker TO appuser;")
+assert_eq "$_destination_globals_out" "$_destination_globals_expected" "global_filter: preserves the destination role definition and grants"
+
+_quoted_destination_globals_out=$(printf '%s\n' \
+    "CREATE ROLE \"app user\";" \
+    "ALTER ROLE \"app user\" WITH NOSUPERUSER PASSWORD 'old-password';" \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";" | pg_filter_globals_for_destination "app user")
+_quoted_destination_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";")
+assert_eq "$_quoted_destination_globals_out" "$_quoted_destination_globals_expected" "global_filter: preserves quoted destination role with spaces"
+
+# -----------------------------------------------------------------------
 # timescaledb_version_matches
 # -----------------------------------------------------------------------
 assert_true  "ts_match: equal"           timescaledb_version_matches "2.27.2" "2.27.2"
 assert_false "ts_match: differ"          timescaledb_version_matches "2.27.2" "2.15.0"
 assert_false "ts_match: source vs empty" timescaledb_version_matches "2.27.2" ""
+assert_true  "ts_version: release is safe" timescaledb_version_is_safe "2.28.3"
+assert_true  "ts_version: prerelease is safe" timescaledb_version_is_safe "2.28.0-rc1"
+assert_false "ts_version: SQL is rejected" timescaledb_version_is_safe "2.28'; DROP DATABASE appdb; --"
+assert_false "ts_version: image fragment is rejected" timescaledb_version_is_safe "2.28/evil"
+
+TS_PREP_DIR="$WORK_DIR/ts-prepare/source/pg_dump"
+mkdir -p "$TS_PREP_DIR"
+printf '%s\n' '-- PostgreSQL database cluster dump complete' >"$TS_PREP_DIR/globals.sql"
+printf '%s\n' 'CREATE TABLE metrics (id int);' '-- PostgreSQL database dump complete' >"$TS_PREP_DIR/db-001.sql"
+printf 'appdb\tappuser\t1\tdb-001.sql\t2.28.3\n' >"$TS_PREP_DIR/manifest.tsv"
+MOCK_COMPAT_PULL=false
+# Mock docker CLI commands for TimescaleDB extension version compatibility tests.
+docker() {
+    case "$*" in
+        *"default_version FROM pg_available_extensions"*) printf '2.28.3\n' ;;
+        *"SHOW server_version_num"*) printf '170010\n' ;;
+        *" pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
+        *) return 1 ;;
+    esac
+}
+assert_true "ts_prepare: matching destination needs no conversion" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$PG_PREPARED_DUMP_DIR" "$TS_PREP_DIR" "ts_prepare: original validated dump retained"
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: compatibility image not pulled for matching versions"
+
+printf 'appdb\tappuser\t1\tdb-001.sql\t\n' >"$TS_PREP_DIR/manifest.tsv"
+assert_false "ts_prepare: versionless Timescale manifest fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+unset -f docker
 
 # -----------------------------------------------------------------------
 # format_timescaledb_mismatch_help
@@ -424,11 +701,10 @@ contains() { [[ "$1" == *"$2"* ]]; }
 _help=$(format_timescaledb_mismatch_help "pasarguard" "2.27.2" "2.15.0" "17" "pasarguard")
 assert_true "help: shows source version"  contains "$_help" "timescaledb 2.27.2"
 assert_true "help: shows target version"  contains "$_help" "timescaledb 2.15.0"
-assert_true "help: exact image tag"       contains "$_help" "timescale/timescaledb:2.27.2-pg17"
+assert_true "help: compatibility image"   contains "$_help" "timescale/timescaledb-ha:pg17-ts2.15-all"
 assert_true "help: data untouched"        contains "$_help" "untouched"
-assert_true "help: this-server warning"   contains "$_help" "do NOT run this on your main server"
-assert_true "help: uses edit subcommand"  contains "$_help" "pasarguard edit"
-assert_true "help: uses restart subcmd"   contains "$_help" "pasarguard restart"
+assert_true "help: automatic conversion"  contains "$_help" "Automatic compatibility conversion"
+assert_true "help: retries restore"        contains "$_help" "pasarguard restore"
 
 _help2=$(format_timescaledb_mismatch_help "db" "2.27.2" "" "" "pasarguard")
 assert_true "help: target not installed"  contains "$_help2" "not installed"
@@ -447,6 +723,34 @@ OS="Arch Linux";           assert_eq "$(get_cron_package_name)" "cronie" "cron_p
 OS="openSUSE Tumbleweed";  assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: openSUSE -> cronie"
 OS="Plan 9";               assert_false "cron_pkg: unknown OS -> non-zero" get_cron_package_name
 OS="$_saved_os"
+
+# -----------------------------------------------------------------------
+# version-script CLI command & completion
+# -----------------------------------------------------------------------
+ver_out=$(pasarguard_main version-script)
+assert_true "version-script: output contains '# Executing pasarguard script, commit:'" contains "$ver_out" "# Executing pasarguard script, commit:"
+
+comp_out=$(generate_completion)
+assert_true "completion: contains version-script" contains "$comp_out" "version-script"
+assert_true "completion: contains script-version" contains "$comp_out" "script-version"
+
+# -----------------------------------------------------------------------
+# mirror.sh HTTPS transport and entrypoint guard
+# -----------------------------------------------------------------------
+http_mirrors=$(grep -E '^[[:space:]]*"http://' "$ROOT_DIR/iran-sanction/mirror.sh" || true)
+assert_eq "$http_mirrors" "" "mirror.sh: no plaintext HTTP APT mirrors"
+assert_true "mirror.sh: has direct-execution guard" \
+    grep -Fq 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then' \
+    "$ROOT_DIR/iran-sanction/mirror.sh"
+
+# -----------------------------------------------------------------------
+# run_all.sh missing suite detection
+# -----------------------------------------------------------------------
+missing_branch=$(grep -A 3 -F 'Suite not found:' "$ROOT_DIR/tests/run_all.sh" || true)
+assert_true "run_all.sh: increments FAILED for missing suites" \
+    contains "$missing_branch" 'FAILED=$((FAILED + 1))'
+assert_true "run_all.sh: records missing suites in FAILED_LIST" \
+    contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
