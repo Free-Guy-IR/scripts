@@ -178,7 +178,7 @@ create_temp_file_in_dir() {
 
 # Fetch the latest commit SHA for a remote branch via the GitHub REST API.
 resolve_remote_commit_sha() {
-    local repo="${1:-PasarGuard/scripts}"
+    local repo="${1:-Free-Guy-IR/scripts}"
     local branch="${2:-main}"
     local response=""
     local sha=""

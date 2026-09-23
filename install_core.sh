@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # Query the remote GitHub repository commit SHA for a branch.
 # Arguments:
-#   $1 - Repository name (default: PasarGuard/scripts)
+#   $1 - Repository name (default: Free-Guy-IR/scripts)
 #   $2 - Target branch (default: main)
 # Outputs:
 #   Writes the remote commit SHA to stdout.
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 #   0 on success, 1 on lookup failure or if remote lookup is disabled.
 # shellcheck disable=SC2120
 resolve_remote_commit_sha() {
-    local repo="${1:-PasarGuard/scripts}"
+    local repo="${1:-Free-Guy-IR/scripts}"
     local branch="${2:-main}"
     local response=""
     local sha=""
