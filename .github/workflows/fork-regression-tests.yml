@@ -13,6 +13,7 @@ on:
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
       - "tests/test_node_serviced_checksum.sh"
+      - "tests/test_fork_panel_image_detection.sh"
       - "install_core.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -26,6 +27,7 @@ on:
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
       - "tests/test_node_serviced_checksum.sh"
+      - "tests/test_fork_panel_image_detection.sh"
       - "install_core.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -57,3 +59,6 @@ jobs:
 
       - name: node-serviced is installed only when it matches the release checksum
         run: bash tests/test_node_serviced_checksum.sh
+
+      - name: Services running the fork's panel image are panel services
+        run: bash tests/test_fork_panel_image_detection.sh
