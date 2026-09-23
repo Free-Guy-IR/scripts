@@ -1,0 +1,41 @@
+name: Fork Regression Tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    paths:
+      - ".github/workflows/fork-regression-tests.yml"
+      - "pasarguard.sh"
+      - "lib/**"
+      - "tests/test_fresh_dump_in_archive.sh"
+      - "tests/test_restore_failure_restarts_panel.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/fork-regression-tests.yml"
+      - "pasarguard.sh"
+      - "lib/**"
+      - "tests/test_fresh_dump_in_archive.sh"
+      - "tests/test_restore_failure_restarts_panel.sh"
+  workflow_dispatch:
+
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync zip unzip
+
+      - name: Backup archives the dump it just took
+        run: bash tests/test_fresh_dump_in_archive.sh
+
+      - name: A failed restore restarts the panel and keeps its log
+        run: bash tests/test_restore_failure_restarts_panel.sh
