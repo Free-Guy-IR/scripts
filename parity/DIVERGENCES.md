@@ -91,7 +91,8 @@ with two changes:
 
 ## Tests only the fork has
 
-These tests are in `tests/`, and `.github/workflows/fork-regression-tests.yml` runs them:
+These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs all of them except
+`test_upstream_parity_check.sh`, which runs in `.github/workflows/upstream-parity.yml`:
 
 - `test_fresh_dump_in_archive.sh`
 - `test_restore_failure_restarts_panel.sh`
