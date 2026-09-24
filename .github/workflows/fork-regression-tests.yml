@@ -7,41 +7,57 @@ on:
   push:
     paths:
       - ".github/workflows/fork-regression-tests.yml"
+      - ".github/workflows/pasarguard-standalone-release.yml"
+      - ".github/workflows/pg-node-standalone-release.yml"
       - "pasarguard.sh"
+      - "pg-node.sh"
+      - "pg-node-service.sh"
+      - "install_core.sh"
       - "lib/**"
+      - "iran-sanction/**"
+      - "tools/**"
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
       - "tests/test_node_serviced_checksum.sh"
       - "tests/test_fork_panel_image_detection.sh"
-      - "install_core.sh"
-      - "pg-node.sh"
-      - "pg-node-service.sh"
-      - "iran-sanction/**"
+      - "tests/test_node_service_unit_mode.sh"
+      - "tests/test_node_service_lock_only_when_installed.sh"
+      - "tests/test_standalone_commit_bake.sh"
+      - "tests/test_node_service_env_interleaving.sh"
   pull_request:
     paths:
       - ".github/workflows/fork-regression-tests.yml"
+      - ".github/workflows/pasarguard-standalone-release.yml"
+      - ".github/workflows/pg-node-standalone-release.yml"
       - "pasarguard.sh"
+      - "pg-node.sh"
+      - "pg-node-service.sh"
+      - "install_core.sh"
       - "lib/**"
+      - "iran-sanction/**"
+      - "tools/**"
       - "tests/test_fresh_dump_in_archive.sh"
       - "tests/test_restore_failure_restarts_panel.sh"
       - "tests/test_fork_script_repo.sh"
       - "tests/test_node_serviced_checksum.sh"
       - "tests/test_fork_panel_image_detection.sh"
-      - "install_core.sh"
-      - "pg-node.sh"
-      - "pg-node-service.sh"
-      - "iran-sanction/**"
+      - "tests/test_node_service_unit_mode.sh"
+      - "tests/test_node_service_lock_only_when_installed.sh"
+      - "tests/test_standalone_commit_bake.sh"
+      - "tests/test_node_service_env_interleaving.sh"
   workflow_dispatch:
 
 jobs:
   regressions:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Install test dependencies
         run: |
@@ -54,7 +70,7 @@ jobs:
       - name: A failed restore restarts the panel and keeps its log
         run: bash tests/test_restore_failure_restarts_panel.sh
 
-      - name: The scripts report and fetch the fork, not upstream
+      - name: Scripts report their commit honestly and fetch the fork
         run: bash tests/test_fork_script_repo.sh
 
       - name: node-serviced is installed only when it matches the release checksum
@@ -62,3 +78,15 @@ jobs:
 
       - name: Services running the fork's panel image are panel services
         run: bash tests/test_fork_panel_image_detection.sh
+
+      - name: The node-serviced unit is written with mode 644
+        run: bash tests/test_node_service_unit_mode.sh
+
+      - name: No node-serviced update lock on nodes without node-serviced
+        run: bash tests/test_node_service_lock_only_when_installed.sh
+
+      - name: Standalone bundles report the commit they were built from
+        run: bash tests/test_standalone_commit_bake.sh
+
+      - name: node-serviced rollbacks keep concurrent .env edits
+        run: bash tests/test_node_service_env_interleaving.sh
