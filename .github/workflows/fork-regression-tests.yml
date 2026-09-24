@@ -25,6 +25,8 @@ on:
       - "tests/test_node_service_lock_only_when_installed.sh"
       - "tests/test_standalone_commit_bake.sh"
       - "tests/test_node_service_env_interleaving.sh"
+      - "tests/test_fork_workflow_hardening.sh"
+      - ".github/workflows/upstream-parity.yml"
   pull_request:
     paths:
       - ".github/workflows/fork-regression-tests.yml"
@@ -46,6 +48,8 @@ on:
       - "tests/test_node_service_lock_only_when_installed.sh"
       - "tests/test_standalone_commit_bake.sh"
       - "tests/test_node_service_env_interleaving.sh"
+      - "tests/test_fork_workflow_hardening.sh"
+      - ".github/workflows/upstream-parity.yml"
   workflow_dispatch:
 
 jobs:
@@ -90,3 +94,6 @@ jobs:
 
       - name: node-serviced rollbacks keep concurrent .env edits
         run: bash tests/test_node_service_env_interleaving.sh
+
+      - name: Fork workflows pin their actions and drop the job token
+        run: bash tests/test_fork_workflow_hardening.sh
