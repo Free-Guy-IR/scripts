@@ -50,23 +50,22 @@ get_script_commit_sha() {
     fi
 
     if command -v git >/dev/null 2>&1; then
-        commit_sha=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
-        if [ -n "$commit_sha" ]; then
-            printf '%s\n' "$commit_sha"
-            return 0
+        local checkout_root=""
+        checkout_root=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+        if [ -n "$checkout_root" ] && [ -f "$checkout_root/lib/common.sh" ] &&
+            [ "$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" = "$(cd "$checkout_root" 2>/dev/null && pwd -P)" ]; then
+            commit_sha=$(git -C "$checkout_root" rev-parse HEAD 2>/dev/null || true)
+            if [ -n "$commit_sha" ]; then
+                if [ -n "$(git -C "$checkout_root" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+                    commit_sha="${commit_sha}-dirty"
+                fi
+                printf '%s\n' "$commit_sha"
+                return 0
+            fi
         fi
     fi
 
-    # install_core.sh is normally piped straight into bash, so there is no git
-    # checkout and no baked-in SHA. Ask GitHub which commit "main" currently
-    # points to instead of printing the literal branch name.
-    commit_sha=$(resolve_remote_commit_sha)
-    if [ -n "$commit_sha" ]; then
-        printf '%s\n' "$commit_sha"
-        return 0
-    fi
-
-    printf '%s\n' "main"
+    printf '%s\n' "unpinned (main)"
 }
 
 # Download Xray latest

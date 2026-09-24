@@ -215,24 +215,31 @@ get_script_commit_sha() {
         return 0
     fi
 
-    if [ -n "$script_dir" ] && command -v git >/dev/null 2>&1; then
-        commit_sha=$(git -C "$script_dir" rev-parse HEAD 2>/dev/null || true)
+    if [ -n "$script_dir" ]; then
+        commit_sha=$(scripts_checkout_commit "$script_dir")
         if [ -n "$commit_sha" ]; then
             printf '%s\n' "$commit_sha"
             return 0
         fi
     fi
 
-    # Scripts are normally installed via `curl ... | bash`, so there is no git
-    # checkout and no baked-in SHA to fall back on. Ask GitHub which commit
-    # "main" currently points to instead of printing the literal branch name.
-    commit_sha=$(resolve_remote_commit_sha "${PASARGUARD_SCRIPT_REPO:-}" "${PASARGUARD_SCRIPT_BRANCH:-}")
-    if [ -n "$commit_sha" ]; then
-        printf '%s\n' "$commit_sha"
-        return 0
-    fi
+    printf '%s\n' "unpinned (main)"
+}
 
-    printf '%s\n' "main"
+scripts_checkout_commit() {
+    local script_dir="$1"
+    local checkout_root="" commit_sha=""
+
+    command -v git >/dev/null 2>&1 || return 0
+    checkout_root=$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)
+    [ -n "$checkout_root" ] && [ -f "$checkout_root/lib/common.sh" ] || return 0
+    [ "$(cd "$script_dir" 2>/dev/null && pwd -P)" = "$(cd "$checkout_root" 2>/dev/null && pwd -P)" ] || return 0
+    commit_sha=$(git -C "$checkout_root" rev-parse HEAD 2>/dev/null || true)
+    [ -n "$commit_sha" ] || return 0
+    if [ -n "$(git -C "$checkout_root" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        commit_sha="${commit_sha}-dirty"
+    fi
+    printf '%s\n' "$commit_sha"
 }
 
 # Print a standardized execution banner with script name, action, and resolved commit SHA.

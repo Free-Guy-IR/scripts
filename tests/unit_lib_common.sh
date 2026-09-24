@@ -136,7 +136,10 @@ assert_eq "$(get_script_commit_sha "$WORK_DIR" "a23123f03978989e95d257beb9de0c5a
         "custom_script_sha" "get_script_commit_sha: respects SCRIPT_COMMIT_SHA override"
 )
 
-git_expected=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "main")
+git_expected=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unpinned (main)")
+if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    git_expected="${git_expected}-dirty"
+fi
 assert_eq "$(get_script_commit_sha "$ROOT_DIR" "__SCRIPT_COMMIT_SHA__")" \
     "$git_expected" "get_script_commit_sha: resolves commit from git repo"
 
@@ -145,11 +148,9 @@ mkdir -p "$no_git_dir"
 (
     export PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP=1
     assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
-        "main" "get_script_commit_sha: falls back to 'main' outside git repo when remote lookup is unavailable"
+        "unpinned (main)" "get_script_commit_sha: reports an unpinned copy outside a git checkout"
 )
 
-# When no git checkout is present (e.g. `curl | bash` installs), the real
-# commit SHA is resolved from GitHub instead of printing the literal branch name.
 (
     stub_bin_dir="$WORK_DIR/stub_bin"
     mkdir -p "$stub_bin_dir"
@@ -160,8 +161,8 @@ EOF
     chmod +x "$stub_bin_dir/curl"
     export PATH="$stub_bin_dir:$PATH"
     assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
-        "deadbeef1234567890deadbeef1234567890dead" \
-        "get_script_commit_sha: resolves real commit SHA from GitHub when no git checkout is available"
+        "unpinned (main)" \
+        "get_script_commit_sha: does not claim GitHub main's current head for a copy that may not contain it"
 )
 
 assert_eq "$(print_script_execution_header "pasarguard" "test_commit_sha" "install")" \
