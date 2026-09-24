@@ -2608,7 +2608,7 @@ EOF
         rm -f "$unit_temp"
         return 1
     fi
-    if ! mark_node_service_transaction_mutation_started; then
+    if ! chmod 644 "$unit_temp" || ! mark_node_service_transaction_mutation_started; then
         rm -f "$unit_temp"
         return 1
     fi
