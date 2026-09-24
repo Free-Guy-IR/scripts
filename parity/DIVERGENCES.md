@@ -52,11 +52,11 @@ the binary in atomically, and rolls back after a failed restart or readiness che
 
 | Commit | Change |
 |---|---|
-| b800167 | The systemd unit is written with mode 644. The pull request left it at 600 because of `umask 077`. |
-| 2d6583b | `service-update` and the uninstall probe skip the update lock when neither the unit nor the binary exists, so nodes without node-serviced get no lock file. The systemd query itself stays inside the guarded transaction. |
-| eef8e2a | See the list below. |
+| 2cf37a6 | The systemd unit is written with mode 644. The pull request left it at 600 because of `umask 077`. |
+| f4e8aa1 | `service-update` and the uninstall probe skip the update lock when neither the unit nor the binary exists, so nodes without node-serviced get no lock file. The systemd query itself stays inside the guarded transaction. |
+| e190d3d | See the list below. |
 
-What eef8e2a changes:
+What e190d3d changes:
 
 - **What gets snapshotted:** `begin_node_service_transaction` takes the paths to snapshot.
   - `service-update` snapshots only the binary.
@@ -77,13 +77,13 @@ What eef8e2a changes:
 **What upstream 81237a3 and 152f09d do:** they print the commit a script runs from. The fork keeps the banner,
 with two changes:
 
-- **Honest report (25eb615):** `get_script_commit_sha` no longer asks GitHub for main's current head.
+- **Honest report (2f10e0f):** `get_script_commit_sha` no longer asks GitHub for main's current head.
   - An installed copy keeps the script it was installed with, so main's head can be a commit it does not contain.
   - A copy without a baked SHA reports `unpinned (main)`.
   - A git HEAD is reported only for the root of a clean checkout of this repository, with `-dirty` when tracked
     files differ.
   - `tests/unit_lib_common.sh` follows the new contract.
-- **Baking (4d3753b):** both standalone release workflows bake the release commit through
+- **Baking (4add693):** both standalone release workflows bake the release commit through
   `tools/bake-script-commit.sh`.
   - The tool rewrites only the `SCRIPT_COMMIT_SHA=` assignment line.
   - Upstream's `sed` over every `.sh` file also rewrote the sentinel comparisons, so a bundle never reported the

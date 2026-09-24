@@ -1,6 +1,6 @@
 kind	name	sha	decision	detail
 branch	shared_lib	bbb0fc6c4712cfb8b189c8ff0524f5df60401876	waived	Pre-merge branch of upstream PR #19. Its end state landed on upstream main as 1a1bbfd (refactor: Shared lib #19), which the fork contains.
-pr	25	4c54ca1e6a65aef59e80fa6f27b254ae61186d79	ported-with-changes	Harden node-serviced updates (open upstream). Squash-ported as f32806d; the fork then changed it in b800167, 2d6583b and eef8e2a. See parity/DIVERGENCES.md.
+pr	25	4c54ca1e6a65aef59e80fa6f27b254ae61186d79	ported-with-changes	Harden node-serviced updates (open upstream). Squash-ported as f32806d; the fork then changed it in 2cf37a6, f4e8aa1 and e190d3d. See parity/DIVERGENCES.md.
 pr	32	fad1f6662cc03c5d073ad17709f3db1bedee0d0d	deferred	PgBouncer and asyncpg prepared statements (panel#882). A real bug for postgresql and timescaledb installs, which the fork still routes through PgBouncer on 6432. Not ported yet because it needs a panel plus PgBouncer docker test first; the owner decides when. Production runs MySQL.
 pr	30	ff511087bf290c8dedf573a2807abb3a7a1d2160	deferred	doctor, mirror manager and status parsing feature (about 1300 lines), still under upstream review. Port once upstream merges it.
 pr	22	497f30ac8178cad3643ddf14d12032e8303294c5	deferred	Multiple Telegram chat IDs for backups, written against the backup code before upstream #23/#24 and conflicting with it. Port once upstream merges a rebased version.
