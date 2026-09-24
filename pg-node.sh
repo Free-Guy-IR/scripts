@@ -301,8 +301,23 @@ require_node_service_installed() {
 # Update and restart the node systemd service if currently installed.
 update_service_if_installed() (
     local report_missing="${1:-false}"
+    local service_query_status=0
 
     set_service_paths
+    if service_installed; then
+        :
+    else
+        service_query_status=$?
+        if [ "$service_query_status" -ne 1 ]; then
+            colorized_echo red "Failed to inspect $SERVICE_NAME installation state."
+            return "$service_query_status"
+        fi
+        if [ "$report_missing" = true ]; then
+            colorized_echo red "Service not installed. Run service-install first."
+            return 1
+        fi
+        return 0
+    fi
     if [ "$(id -u)" != "0" ]; then
         colorized_echo yellow "$SERVICE_NAME is installed; run as root to update/restart it."
         return
@@ -2781,6 +2796,20 @@ uninstall_service_command() (
     fi
     require_systemd
     set_service_paths
+    local service_query_status=0
+    if service_installed; then
+        :
+    else
+        service_query_status=$?
+        if [ "$service_query_status" -ne 1 ]; then
+            colorized_echo red "Failed to inspect $SERVICE_NAME installation state."
+            return "$service_query_status"
+        fi
+        if [ "$quiet_if_missing" != true ]; then
+            colorized_echo yellow "Service not installed; nothing to uninstall."
+        fi
+        return 0
+    fi
     if ! acquire_node_serviced_update_lock; then
         return 1
     fi
