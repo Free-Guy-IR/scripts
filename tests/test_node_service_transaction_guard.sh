@@ -119,8 +119,6 @@ systemctl() {
 
 install_node_service_script() {
     activate_node_serviced_binary "$VALID_BINARY"
-    printf 'new-env\n' > "$ENV_FILE"
-    printf 'new-unit\n' > "$SERVICE_UNIT"
     : > "$ACTIVATED_MARKER"
 }
 transaction_test_install_node_service_script_definition=$(declare -f install_node_service_script)
@@ -307,7 +305,7 @@ require_systemd() { :; }
 detect_os() { :; }
 install_package() { :; }
 is_node_installed() { return 0; }
-ensure_env_exists() { printf 'generated-env\n' > "$ENV_FILE"; }
+ensure_env_exists() { :; }
 sync_env_ssl_paths() { :; }
 get_occupied_ports() { OCCUPIED_PORTS=""; }
 is_port_occupied() { return 1; }

@@ -172,6 +172,11 @@ NODE_SERVICE_BINARY_NAME="node-serviced"
 NODE_SERVICE_STAGED_PATH=""
 NODE_SERVICE_DOWNLOAD_TMP_DIR=""
 NODE_SERVICE_UPDATE_LOCK_HELD=false
+NODE_ENV_LOCK_HELD=false
+NODE_SERVICE_ENV_WRITE_ACTIVE=false
+NODE_SERVICE_ENV_WRITE_TARGET=""
+NODE_SERVICE_ENV_BEFORE_WRITE=""
+NODE_SERVICE_ENV_AFTER_WRITE=""
 NODE_SERVICE_TRANSACTION_ACTIVE=false
 NODE_SERVICE_TRANSACTION_COMMITTED=false
 NODE_SERVICE_TRANSACTION_STATE_CAPTURED=false
@@ -319,7 +324,7 @@ update_service_if_installed() (
     fi
     # Arm the guard before querying systemd. A wedged systemctl must not hold
     # the mutation lock without bounded cleanup and rollback protection.
-    if ! begin_node_service_transaction; then
+    if ! begin_node_service_transaction "$SERVICE_BINARY_PATH"; then
         colorized_echo red "Failed to snapshot or inspect $SERVICE_NAME before updating it."
         return 1
     fi
@@ -345,6 +350,93 @@ update_service_if_installed() (
     commit_node_service_transaction
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 )
+
+node_env_lock_path() {
+    printf '%s\n' "${NODE_ENV_LOCK_PATH:-${ENV_FILE}.lock}"
+}
+
+acquire_node_env_lock() {
+    local wait_seconds="${1:-${NODE_ENV_LOCK_WAIT_SECONDS:-30}}"
+    local lock_path
+
+    if [ "$NODE_ENV_LOCK_HELD" = true ]; then
+        return 0
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        colorized_echo red "flock is required to change $ENV_FILE safely."
+        return 1
+    fi
+    if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
+        colorized_echo red "Invalid $ENV_FILE lock wait: $wait_seconds"
+        return 1
+    fi
+    lock_path=$(node_env_lock_path)
+    if ! exec 8>>"$lock_path"; then
+        colorized_echo red "Failed to open the $ENV_FILE lock at $lock_path."
+        return 1
+    fi
+    if ! flock -w "$wait_seconds" 8; then
+        exec 8>&-
+        colorized_echo red "$ENV_FILE is being changed by another $APP_NAME command; try again once it has finished."
+        return 1
+    fi
+    NODE_ENV_LOCK_HELD=true
+}
+
+release_node_env_lock() {
+    if [ "$NODE_ENV_LOCK_HELD" != true ]; then
+        return 0
+    fi
+    flock -u 8 >/dev/null 2>&1 || true
+    exec 8>&-
+    NODE_ENV_LOCK_HELD=false
+}
+
+node_env_write_target() {
+    if [ -L "$ENV_FILE" ]; then
+        readlink -f "$ENV_FILE"
+    else
+        printf '%s\n' "$ENV_FILE"
+    fi
+}
+
+replace_node_env_file() {
+    local target="$1"
+    local content_file="$2"
+    local staged
+
+    staged=$(create_temp_file_in_dir "$(dirname "$target")" ".$(basename "$target").transaction.staged" "") || return 1
+    if ! cp -p "$target" "$staged" || ! cat "$content_file" >"$staged" || ! mv -f "$staged" "$target"; then
+        rm -f "$staged"
+        return 1
+    fi
+}
+
+discard_node_service_env_write() {
+    [ -z "$NODE_SERVICE_ENV_BEFORE_WRITE" ] || rm -f "$NODE_SERVICE_ENV_BEFORE_WRITE"
+    [ -z "$NODE_SERVICE_ENV_AFTER_WRITE" ] || rm -f "$NODE_SERVICE_ENV_AFTER_WRITE"
+    NODE_SERVICE_ENV_WRITE_ACTIVE=false
+    NODE_SERVICE_ENV_WRITE_TARGET=""
+    NODE_SERVICE_ENV_BEFORE_WRITE=""
+    NODE_SERVICE_ENV_AFTER_WRITE=""
+}
+
+revert_node_service_env_write() {
+    [ "$NODE_SERVICE_ENV_WRITE_ACTIVE" = true ] || return 0
+    acquire_node_env_lock || return 1
+    if cmp -s "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_BEFORE_WRITE"; then
+        :
+    elif cmp -s "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_AFTER_WRITE"; then
+        if ! replace_node_env_file "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_BEFORE_WRITE"; then
+            release_node_env_lock
+            return 1
+        fi
+    else
+        colorized_echo yellow "$ENV_FILE changed after API_PORT was written to it, so the rollback left it as it is. Remove API_PORT from it by hand if nothing should use it."
+    fi
+    release_node_env_lock
+    discard_node_service_env_write
+}
 
 node_service_artifacts_present() {
     [ -e "$SERVICE_UNIT" ] || [ -L "$SERVICE_UNIT" ] || [ -e "$SERVICE_BINARY_PATH" ] || [ -L "$SERVICE_BINARY_PATH" ]
@@ -402,6 +494,7 @@ cleanup_node_service_transaction_backups() {
     for backup in "${NODE_SERVICE_TRANSACTION_BACKUPS[@]}" "${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[@]}"; do
         [ -z "$backup" ] || rm -f "$backup"
     done
+    discard_node_service_env_write
     NODE_SERVICE_TRANSACTION_PATHS=()
     NODE_SERVICE_TRANSACTION_HAD_PATH=()
     NODE_SERVICE_TRANSACTION_BACKUPS=()
@@ -624,6 +717,7 @@ rollback_node_service_transaction() {
     for ((index = ${#NODE_SERVICE_TRANSACTION_PATHS[@]} - 1; index >= 0; index--)); do
         restore_node_service_snapshot_entry "$index" || restore_failed=true
     done
+    revert_node_service_env_write || restore_failed=true
     if ! run_node_service_systemctl daemon-reload; then
         restore_failed=true
     fi
@@ -664,13 +758,15 @@ finish_node_service_transaction() {
         NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
     fi
     release_node_serviced_update_lock
+    release_node_env_lock
     trap - INT TERM
 }
 
 report_retained_node_service_backups() {
     local backup
 
-    for backup in "${NODE_SERVICE_TRANSACTION_BACKUPS[@]}" "${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[@]}"; do
+    for backup in "${NODE_SERVICE_TRANSACTION_BACKUPS[@]}" "${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[@]}" \
+        "$NODE_SERVICE_ENV_BEFORE_WRITE" "$NODE_SERVICE_ENV_AFTER_WRITE"; do
         [ -z "$backup" ] || colorized_echo red "Retained transaction backup: $backup"
     done
 }
@@ -703,6 +799,7 @@ node_service_transaction_guard() {
         NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
     fi
     release_node_serviced_update_lock
+    release_node_env_lock
 
     case "$event" in
     INT) signal_status=130 ;;
@@ -729,13 +826,21 @@ begin_node_service_transaction() {
     NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET=()
     NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS=()
     NODE_SERVICE_TRANSACTION_RESTORED=()
+    NODE_SERVICE_ENV_WRITE_ACTIVE=false
+    NODE_SERVICE_ENV_WRITE_TARGET=""
+    NODE_SERVICE_ENV_BEFORE_WRITE=""
+    NODE_SERVICE_ENV_AFTER_WRITE=""
     trap 'node_service_transaction_guard EXIT "$?"' EXIT
     trap 'node_service_transaction_guard INT "$?"' INT
     trap 'node_service_transaction_guard TERM "$?"' TERM
 
-    snapshot_node_service_path "$ENV_FILE" || return 1
-    snapshot_node_service_path "$SERVICE_UNIT" || return 1
-    snapshot_node_service_path "$SERVICE_BINARY_PATH" || return 1
+    if [ "$#" -eq 0 ]; then
+        set -- "$ENV_FILE" "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
+    fi
+    local snapshot_path
+    for snapshot_path in "$@"; do
+        snapshot_node_service_path "$snapshot_path" || return 1
+    done
     if service_installed; then
         NODE_SERVICE_TRANSACTION_HAD_SERVICE=true
     else
@@ -2215,6 +2320,22 @@ sync_env_ssl_paths() {
     if [ ! -f "$ENV_FILE" ]; then
         return
     fi
+    node_env_ssl_paths_stale || return 0
+    acquire_node_env_lock "${NODE_ENV_LOCK_WAIT_SECONDS:-10}" || return 1
+    local sync_status=0
+    apply_node_env_ssl_paths || sync_status=$?
+    release_node_env_lock
+    return "$sync_status"
+}
+
+node_env_ssl_paths_stale() {
+    local current_cert current_key
+    current_cert=$(grep -E '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_CERT_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
+    current_key=$(grep -E '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_KEY_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
+    [[ -z "$current_cert" || "$current_cert" =~ /var/lib/pg-node/ || -z "$current_key" || "$current_key" =~ /var/lib/pg-node/ ]]
+}
+
+apply_node_env_ssl_paths() {
     local desired_cert="${DATA_DIR}/certs/ssl_cert.pem"
     local desired_key="${DATA_DIR}/certs/ssl_key.pem"
     local current_cert current_key updated=false
@@ -2637,33 +2758,78 @@ can_reuse_node_service_api_port() {
 replace_node_service_api_port() {
     local api_port="$1"
     local api_port_comment="$2"
+    local env_file="${3:-$ENV_FILE}"
 
-    sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$ENV_FILE" || return 1
-    if ! grep -q '^# *API_PORT' "$ENV_FILE"; then
-        sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$ENV_FILE" || return 1
+    sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$env_file" || return 1
+    if ! grep -q '^# *API_PORT' "$env_file"; then
+        sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$env_file" || return 1
     fi
 }
 
 append_node_service_api_port() {
     local api_port="$1"
     local api_port_comment="$2"
+    local env_file="${3:-$ENV_FILE}"
 
     {
         printf '\n'
         printf '%s\n' "$api_port_comment"
         printf 'API_PORT= %s\n' "$api_port"
-    } >>"$ENV_FILE"
+    } >>"$env_file"
 }
 
 persist_node_service_api_port() {
     local api_port="$1"
     local api_port_comment="$2"
+    local target target_dir target_name staged before after
 
-    if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
-        replace_node_service_api_port "$api_port" "$api_port_comment"
-    else
-        append_node_service_api_port "$api_port" "$api_port_comment"
+    acquire_node_env_lock || return 1
+    target=$(node_env_write_target)
+    target_dir=$(dirname "$target")
+    target_name=$(basename "$target")
+    staged=$(create_temp_file_in_dir "$target_dir" ".${target_name}.transaction.staged" "") || {
+        release_node_env_lock
+        return 1
+    }
+    before=$(create_temp_file_in_dir "$target_dir" ".${target_name}.transaction.before" "") || {
+        rm -f "$staged"
+        release_node_env_lock
+        return 1
+    }
+    after=$(create_temp_file_in_dir "$target_dir" ".${target_name}.transaction.after" "") || {
+        rm -f "$staged" "$before"
+        release_node_env_lock
+        return 1
+    }
+    if ! cat "$target" >"$before" || ! cp -p "$target" "$staged"; then
+        rm -f "$staged" "$before" "$after"
+        release_node_env_lock
+        return 1
     fi
+    if grep -q '^API_PORT[[:space:]]*=' "$staged"; then
+        replace_node_service_api_port "$api_port" "$api_port_comment" "$staged"
+    else
+        append_node_service_api_port "$api_port" "$api_port_comment" "$staged"
+    fi || {
+        rm -f "$staged" "$before" "$after"
+        release_node_env_lock
+        return 1
+    }
+    if ! cat "$staged" >"$after" || ! mark_node_service_transaction_mutation_started; then
+        rm -f "$staged" "$before" "$after"
+        release_node_env_lock
+        return 1
+    fi
+    NODE_SERVICE_ENV_WRITE_TARGET="$target"
+    NODE_SERVICE_ENV_BEFORE_WRITE="$before"
+    NODE_SERVICE_ENV_AFTER_WRITE="$after"
+    NODE_SERVICE_ENV_WRITE_ACTIVE=true
+    if ! mv -f "$staged" "$target"; then
+        rm -f "$staged"
+        release_node_env_lock
+        return 1
+    fi
+    release_node_env_lock
 }
 
 # Configure, install, and start the node systemd service unit.
@@ -2698,7 +2864,7 @@ install_service_command() (
     if ! acquire_node_serviced_update_lock; then
         return 1
     fi
-    if ! begin_node_service_transaction; then
+    if ! begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"; then
         colorized_echo red "Failed to snapshot $SERVICE_NAME before installation."
         return 1
     fi
@@ -2801,7 +2967,7 @@ uninstall_service_command() (
     if ! acquire_node_serviced_update_lock; then
         return 1
     fi
-    if ! begin_node_service_transaction; then
+    if ! begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"; then
         colorized_echo red "Failed to snapshot or inspect $SERVICE_NAME before uninstalling it."
         return 1
     fi
@@ -3253,7 +3419,11 @@ edit_env_command() {
     detect_os
     check_editor
     if [ -f "$ENV_FILE" ]; then
-        $EDITOR "$ENV_FILE"
+        acquire_node_env_lock "${NODE_ENV_LOCK_WAIT_SECONDS:-10}" || exit 1
+        local editor_status=0
+        $EDITOR "$ENV_FILE" || editor_status=$?
+        release_node_env_lock
+        return "$editor_status"
     else
         colorized_echo red "Environment file not found at $ENV_FILE"
         exit 1
@@ -3504,8 +3674,13 @@ geofiles_command() {
         else
             xray_assets_path="$DATA_DIR/assets"
         fi
+        if ! acquire_node_env_lock; then
+            colorized_echo red "Geofiles were downloaded, but XRAY_ASSETS_PATH could not be written to $ENV_FILE."
+            exit 1
+        fi
         sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $xray_assets_path|" "$ENV_FILE"
         grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $xray_assets_path" >> "$ENV_FILE"
+        release_node_env_lock
         colorized_echo blue "XRAY_ASSETS_PATH updated in $ENV_FILE"
         colorized_echo blue "Restarting node services..."
         restart_command -n --no-restart-service
@@ -3620,7 +3795,7 @@ renew_cert_command() {
 # Main CLI dispatch handler for pg-node.
 pg_node_main() {
     # Bring existing env SSL paths in line with the current APP_NAME (safe no-op if not installed/default)
-    sync_env_ssl_paths
+    sync_env_ssl_paths || colorized_echo yellow "SSL paths in $ENV_FILE were not updated this time; the next $APP_NAME command will retry."
 
     case "$1" in
     install)
