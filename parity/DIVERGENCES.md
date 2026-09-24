@@ -148,6 +148,22 @@ What e190d3d changes:
   - `tests/unit_pgnode.sh` runs with `pipefail`, which is why "port 80 is busy" failed now and then.
   - The scripts themselves do not set `pipefail`, so installs were not affected.
 
+## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
+
+**Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 2cfe87b.
+
+**What it does:** PostgreSQL and TimescaleDB installs connect through PgBouncer in transaction mode, which breaks the
+panel's asyncpg prepared statements on PgBouncer before 1.24. The port writes the panel URL with
+`prepared_statement_cache_size=0`, and gives PgBouncer `MAX_PREPARED_STATEMENTS`, `IGNORE_STARTUP_PARAMETERS` and
+`ADMIN_USERS` plus a `pg_isready` health check.
+
+**How the fork's copy differs from the pull request:** the fork does not take its `postgres:latest` to
+`postgres:17-alpine` pin. The pin is unrelated to #882, and fork installs made so far run `postgres:latest` (18) on the
+same `/var/lib/postgresql` mount, so a new install on 17 would have to restore dumps taken by 18.
+
+**Test:** `tests/docker/pgbouncer_prepared_statements.sh`, run by `.github/workflows/pgbouncer-prepared-statements.yml`
+for postgresql and timescaledb, with the compose's own PgBouncer image and with PgBouncer 1.23.
+
 ## Version banner and standalone bundles
 
 **What upstream 81237a3 and 152f09d do:** they print the commit a script runs from. The fork keeps the banner,
