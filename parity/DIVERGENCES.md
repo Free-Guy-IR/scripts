@@ -103,3 +103,4 @@ These tests are in `tests/`, and `.github/workflows/fork-regression-tests.yml` r
 - `test_standalone_commit_bake.sh`
 - `test_node_service_env_interleaving.sh`
 - `test_upstream_parity_check.sh`
+- `test_fork_workflow_hardening.sh`
