@@ -29,8 +29,7 @@ export PG_NODE_SOURCE_ONLY="true"
 source "$SCRIPTS_ROOT/pg-node.sh" >/dev/null 2>&1
 set +e
 wait_for() {
-    local i
-    for i in $(seq 1 200); do
+    for _ in $(seq 1 200); do
         [ -e "$1" ] && return 0
         sleep 0.05
     done
@@ -70,8 +69,7 @@ pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
 wait_for() {
-    local i
-    for i in $(seq 1 200); do
+    for _ in $(seq 1 200); do
         [ -e "$1" ] && return 0
         sleep 0.05
     done
