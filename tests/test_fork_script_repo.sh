@@ -6,11 +6,16 @@ FORK_REPO="Free-Guy-IR/scripts"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 CURL_LOG="$WORK_DIR/curl.log"
+NOT_A_CHECKOUT="$WORK_DIR/installed"
+mkdir -p "$NOT_A_CHECKOUT"
+REMOTE_HEAD="0123456789abcdef0123456789abcdef01234567"
+BAKED_SHA="89abcdef0123456789abcdef0123456789abcdef"
+UNPINNED="unpinned (main)"
 FAILURES=0
 
 curl() {
     printf '%s\n' "$*" >>"$CURL_LOG"
-    printf '{"sha": "0123456789abcdef0123456789abcdef01234567"}'
+    printf '{"sha": "%s"}' "$REMOTE_HEAD"
 }
 
 check_lookup() {
@@ -27,12 +32,39 @@ check_lookup() {
     fi
 }
 
+check_reported() {
+    local label="$1"
+    local expected="$2"
+    shift 2
+    local actual
+    : >"$CURL_LOG"
+    unset PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP
+    actual="$("$@")"
+    if [ "$actual" != "$expected" ]; then
+        echo "FAIL: $label reports '$actual', expected '$expected'"
+        FAILURES=$((FAILURES + 1))
+    elif [ -s "$CURL_LOG" ]; then
+        echo "FAIL: $label asked the network ($(tr '\n' ' ' <"$CURL_LOG")) although nothing it reports comes from there"
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "PASS: $label reports '$expected' without asking the network"
+    fi
+}
+
 (
     source "$SCRIPTS_ROOT/lib/common.sh"
     check_lookup "lib/common.sh resolve_remote_commit_sha with no repo" resolve_remote_commit_sha
     check_lookup "lib/common.sh resolve_remote_commit_sha with an empty repo" resolve_remote_commit_sha "" ""
     unset SCRIPT_COMMIT_SHA PASARGUARD_SCRIPT_COMMIT PASARGUARD_SCRIPT_REPO PASARGUARD_SCRIPT_BRANCH
-    check_lookup "lib/common.sh get_script_commit_sha outside a git checkout" get_script_commit_sha "$WORK_DIR" ""
+    check_reported "lib/common.sh: an installed copy with no baked commit" "$UNPINNED" \
+        get_script_commit_sha "$NOT_A_CHECKOUT" "__SCRIPT_COMMIT_SHA__"
+    check_reported "lib/common.sh: a copy with no script directory and no baked commit" "$UNPINNED" \
+        get_script_commit_sha "" "__SCRIPT_COMMIT_SHA__"
+    check_reported "lib/common.sh: a baked copy" "$BAKED_SHA" \
+        get_script_commit_sha "$NOT_A_CHECKOUT" "$BAKED_SHA"
+    check_reported "lib/common.sh: the execution header of an installed copy" \
+        "# Executing pasarguard install script, commit: $UNPINNED" \
+        print_script_execution_header "pasarguard" "__SCRIPT_COMMIT_SHA__" "install" "$NOT_A_CHECKOUT"
     exit "$FAILURES"
 ) || FAILURES=$((FAILURES + $?))
 
@@ -43,10 +75,12 @@ check_lookup() {
         exit 1
     fi
     check_lookup "install_core.sh resolve_remote_commit_sha" resolve_remote_commit_sha
-    SCRIPT_DIR="$WORK_DIR"
+    SCRIPT_DIR="$NOT_A_CHECKOUT"
     SCRIPT_COMMIT_SHA="__SCRIPT_COMMIT_SHA__"
     unset PASARGUARD_SCRIPT_COMMIT
-    check_lookup "install_core.sh get_script_commit_sha outside a git checkout" get_script_commit_sha
+    check_reported "install_core.sh piped into bash with no baked commit" "$UNPINNED" get_script_commit_sha
+    SCRIPT_COMMIT_SHA="$BAKED_SHA"
+    check_reported "install_core.sh with a baked commit" "$BAKED_SHA" get_script_commit_sha
     exit "$FAILURES"
 ) || FAILURES=$((FAILURES + $?))
 
