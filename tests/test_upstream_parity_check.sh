@@ -90,7 +90,7 @@ git_in "$UPSTREAM" tag v1.0.1
 git_in "$UPSTREAM" checkout -q main
 refresh
 expect fail "an upstream release tag outside the fork's history fails the check"
-TAG_SHA="$(git -C "$UPSTREAM" rev-parse v1.0.1^{commit})"
+TAG_SHA="$(git -C "$UPSTREAM" rev-parse "v1.0.1^{commit}")"
 printf 'tag\tv1.0.1\t%s\twaived\tside-branch release\n' "$TAG_SHA" >>"$LEDGER"
 expect pass "a decided release tag passes"
 
