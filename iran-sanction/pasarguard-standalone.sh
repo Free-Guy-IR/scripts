@@ -444,11 +444,12 @@ install_pasarguard() {
                 exit 1
             fi
             db_driver_scheme="postgresql+asyncpg"
+            SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}?prepared_statement_cache_size=0"
         else
             db_driver_scheme="mysql+asyncmy"
+            SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
         fi
 
-        SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
         echo "" >>"$ENV_FILE"
         echo "# SQLAlchemy Database URL" >>"$ENV_FILE"
         echo "SQLALCHEMY_DATABASE_URL=\"$SQLALCHEMY_DATABASE_URL\"" >>"$ENV_FILE"

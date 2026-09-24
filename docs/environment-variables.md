@@ -29,7 +29,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql://<DB_USER>:<URL_ENCODED_DB_PASSWORD>@127.0.0.1:6432/pasarguard` |
+| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql+asyncpg://<DB_USER>:<URL_ENCODED_DB_PASSWORD>@127.0.0.1:6432/pasarguard?prepared_statement_cache_size=0` |
 | `DB_NAME` | Primary database name. | `pasarguard` |
 | `DB_USER` | Primary database user. | `pasarguard` |
 | `DB_PASSWORD` | Primary database user password. | `Secr3tP@ssw0rd!` |
@@ -49,6 +49,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 | `PG_MAX_CLIENT_CONN` | Maximum incoming client connections handled by PgBouncer. | `600` | `600` |
 | `PG_DEFAULT_POOL_SIZE` | Persistent server connection pool size in PgBouncer. | `50` | `50` |
 | `PG_RESERVE_POOL_SIZE` | Emergency burst pool size for peak connection spikes. | `25` | `25` |
+| `PG_MAX_PREPARED_STATEMENTS` | Maximum protocol prepared statements tracked by PgBouncer. | `100` | `100` |
 
 ---
 

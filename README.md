@@ -39,7 +39,7 @@
 ## 🌟 Overview
 
 **PasarGuard Scripts** provides battle-tested automation for deploying and maintaining production-grade PasarGuard infrastructure:
-- **PasarGuard Panel (`pasarguard.sh` / `pasarguard`)**: Orchestrates the web dashboard, database engines (SQLite, MySQL, MariaDB, PostgreSQL, TimescaleDB), PgBouncer connection pooling, admin web UIs (pgAdmin, phpMyAdmin), and disaster recovery.
+- **PasarGuard Panel (`pasarguard.sh` / `pasarguard`)**: Orchestrates the web dashboard, database engines (SQLite, MySQL, MariaDB, PostgreSQL, TimescaleDB), native async connection pooling, admin web UIs (pgAdmin, phpMyAdmin), and disaster recovery.
 - **PasarGuard Node (`pg-node.sh` / `pg-node`)**: Manages remote worker nodes, systemd background daemons (`pg-node-service`), Xray-core versions, routing geofiles, and TLS certificates.
 - **Disaster Recovery**: Automated recurring backups to Telegram with proxy support, multi-database cluster snapshots, and fail-closed TimescaleDB version compatibility gates.
 - **Domestic Mirror Optimization**: Benchmark and apply domestic Iranian mirrors for APT and Docker when deploying behind restricted network environments.
@@ -54,7 +54,7 @@
                                │   (Web Dashboard & Background Tasks)    │
                                └──────┬──────────────────────┬───────────┘
                                       │                      │
-                   ┌──────────────────┴────────┐      ┌──────┴────────────────────┐
+                    ┌──────────────────┴────────┐      ┌──────┴────────────────────┐
                    ▼                           ▼      ▼                           ▼
           ┌─────────────────┐         ┌────────────────────┐            ┌───────────────────┐
           │  SQLite / MySQL │         │     PgBouncer      │            │ Automated Backup  │
@@ -250,7 +250,7 @@ PasarGuard supports 5 database engines tailored for different workloads:
 | **MySQL 8.0** | General multi-service | phpMyAdmin (port 8010) | InnoDB transactions |
 | **MariaDB** | High-performance open alternative | phpMyAdmin (port 8010) | Aria / InnoDB |
 | **PostgreSQL 17** | 1,000+ concurrent clients | pgAdmin 4 (port 8010) | PgBouncer transaction pooling (port 6432) |
-| **TimescaleDB** | High-throughput metrics & analytics | pgAdmin 4 (port 8010) | Hypertables + PgBouncer pooling |
+| **TimescaleDB** | High-throughput metrics & analytics | pgAdmin 4 (port 8010) | Hypertables + PgBouncer pooling (port 6432) |
 
 👉 *Read the full database tuning guide in [docs/database-configurations.md](docs/database-configurations.md).*
 

@@ -80,9 +80,9 @@ For production environments with heavy concurrent user connections, PostgreSQL o
 
 #### PgBouncer Connection Pooling
 PostgreSQL processes fork a backend worker per client connection. Under thousands of concurrent VPN sessions, this can exhaust server memory. PasarGuard includes **PgBouncer** in `transaction` pool mode:
-- Panel connects to PgBouncer on port `6432`.
-- PgBouncer multiplexes client queries across a small, persistent pool of server connections on port `5432`.
-- Reduces backend memory footprint by up to 80%.
+- Panel connects to PgBouncer on port `6432` using `postgresql+asyncpg://` with `prepared_statement_cache_size=0`.
+- PgBouncer (v1.21+) tracks protocol-level prepared statements via `max_prepared_statements` and multiplexes client queries across a small, persistent pool of server connections on port `5432`.
+- Reduces backend memory footprint by up to 80% and prevents PostgreSQL connection exhaustion under high concurrent loads.
 
 #### Resource Tuning Parameters
 In `/opt/pasarguard/.env`, you can customize PostgreSQL and PgBouncer memory and concurrency limits:
@@ -94,9 +94,10 @@ PG_SHARED_BUFFERS=512MB      # Dedicated cache memory (recommended: 25% of RAM)
 PG_WORK_MEM=16MB             # Memory used for internal sort operations
 
 # PgBouncer Pooling Parameters
-PG_MAX_CLIENT_CONN=600       # Maximum client connections accepted by PgBouncer
+PG_MAX_CLIENT_CONN=600       # Maximum incoming client connections handled by PgBouncer
 PG_DEFAULT_POOL_SIZE=50      # Default connection pool size per database
 PG_RESERVE_POOL_SIZE=25      # Reserve connections for traffic bursts
+PG_MAX_PREPARED_STATEMENTS=100 # Protocol prepared statement tracking limit
 ```
 
 #### pgAdmin 4 Management Interface
