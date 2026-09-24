@@ -301,17 +301,9 @@ require_node_service_installed() {
 # Update and restart the node systemd service if currently installed.
 update_service_if_installed() (
     local report_missing="${1:-false}"
-    local service_query_status=0
 
     set_service_paths
-    if service_installed; then
-        :
-    else
-        service_query_status=$?
-        if [ "$service_query_status" -ne 1 ]; then
-            colorized_echo red "Failed to inspect $SERVICE_NAME installation state."
-            return "$service_query_status"
-        fi
+    if ! node_service_artifacts_present; then
         if [ "$report_missing" = true ]; then
             colorized_echo red "Service not installed. Run service-install first."
             return 1
@@ -353,6 +345,10 @@ update_service_if_installed() (
     commit_node_service_transaction
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 )
+
+node_service_artifacts_present() {
+    [ -e "$SERVICE_UNIT" ] || [ -L "$SERVICE_UNIT" ] || [ -e "$SERVICE_BINARY_PATH" ] || [ -L "$SERVICE_BINARY_PATH" ]
+}
 
 # $1 is how many seconds to wait for a concurrent holder; 0 fails immediately.
 acquire_node_serviced_update_lock() {
@@ -2796,15 +2792,7 @@ uninstall_service_command() (
     fi
     require_systemd
     set_service_paths
-    local service_query_status=0
-    if service_installed; then
-        :
-    else
-        service_query_status=$?
-        if [ "$service_query_status" -ne 1 ]; then
-            colorized_echo red "Failed to inspect $SERVICE_NAME installation state."
-            return "$service_query_status"
-        fi
+    if ! node_service_artifacts_present; then
         if [ "$quiet_if_missing" != true ]; then
             colorized_echo yellow "Service not installed; nothing to uninstall."
         fi
