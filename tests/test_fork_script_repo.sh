@@ -84,6 +84,44 @@ check_reported() {
     exit "$FAILURES"
 ) || FAILURES=$((FAILURES + $?))
 
+OTHER_REPO="$WORK_DIR/some-other-repo"
+mkdir -p "$OTHER_REPO"
+git -C "$OTHER_REPO" init -q
+git -C "$OTHER_REPO" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m other
+CHECKOUT="$WORK_DIR/checkout"
+mkdir -p "$CHECKOUT/lib"
+cp "$SCRIPTS_ROOT/lib/common.sh" "$CHECKOUT/lib/common.sh"
+cp "$SCRIPTS_ROOT/install_core.sh" "$CHECKOUT/install_core.sh"
+git -C "$CHECKOUT" init -q
+git -C "$CHECKOUT" add lib/common.sh install_core.sh
+git -C "$CHECKOUT" -c user.name=test -c user.email=test@example.com commit -q -m checkout
+CHECKOUT_HEAD="$(git -C "$CHECKOUT" rev-parse HEAD)"
+
+(
+    source "$SCRIPTS_ROOT/lib/common.sh"
+    unset SCRIPT_COMMIT_SHA PASARGUARD_SCRIPT_COMMIT PASARGUARD_SCRIPT_REPO PASARGUARD_SCRIPT_BRANCH
+    check_reported "lib/common.sh: a copy run from inside some other git repository" "$UNPINNED" \
+        get_script_commit_sha "$OTHER_REPO" "__SCRIPT_COMMIT_SHA__"
+    check_reported "lib/common.sh: a clean scripts checkout" "$CHECKOUT_HEAD" \
+        get_script_commit_sha "$CHECKOUT" "__SCRIPT_COMMIT_SHA__"
+    printf '\n' >>"$CHECKOUT/lib/common.sh"
+    check_reported "lib/common.sh: a scripts checkout with local changes" "${CHECKOUT_HEAD}-dirty" \
+        get_script_commit_sha "$CHECKOUT" "__SCRIPT_COMMIT_SHA__"
+    git -C "$CHECKOUT" checkout -q -- lib/common.sh
+    exit "$FAILURES"
+) || FAILURES=$((FAILURES + $?))
+
+(
+    eval "$(sed -n '/^resolve_remote_commit_sha() {$/,/^}$/p;/^get_script_commit_sha() {$/,/^}$/p' "$SCRIPTS_ROOT/install_core.sh")"
+    SCRIPT_COMMIT_SHA="__SCRIPT_COMMIT_SHA__"
+    unset PASARGUARD_SCRIPT_COMMIT
+    SCRIPT_DIR="$OTHER_REPO"
+    check_reported "install_core.sh piped into bash from inside some other git repository" "$UNPINNED" get_script_commit_sha
+    SCRIPT_DIR="$CHECKOUT"
+    check_reported "install_core.sh run from a clean scripts checkout" "$CHECKOUT_HEAD" get_script_commit_sha
+    exit "$FAILURES"
+) || FAILURES=$((FAILURES + $?))
+
 upstream_refs="$(cd "$SCRIPTS_ROOT" && grep -n -I 'PasarGuard/scripts' pasarguard.sh pg-node.sh pg-node-service.sh install_core.sh lib/*.sh iran-sanction/*.sh 2>/dev/null)"
 if [ -n "$upstream_refs" ]; then
     echo "FAIL: shipped scripts still point at PasarGuard/scripts:"
