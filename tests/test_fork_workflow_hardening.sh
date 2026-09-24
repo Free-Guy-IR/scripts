@@ -2,7 +2,7 @@
 set -uo pipefail
 
 SCRIPTS_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-FORK_WORKFLOWS=(fork-regression-tests.yml upstream-parity.yml)
+FORK_WORKFLOWS=(fork-regression-tests.yml upstream-parity.yml pgbouncer-prepared-statements.yml)
 FAILURES=0
 
 for workflow in "${FORK_WORKFLOWS[@]}"; do

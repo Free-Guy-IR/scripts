@@ -1,0 +1,46 @@
+name: PgBouncer Prepared Statements
+
+permissions:
+  contents: read
+
+on:
+  push:
+    paths:
+      - ".github/workflows/pgbouncer-prepared-statements.yml"
+      - "docker-compose/pasarguard-postgresql.yml"
+      - "docker-compose/pasarguard-timescaledb.yml"
+      - "pasarguard.sh"
+      - "tests/docker/pgbouncer_prepared_statements.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/pgbouncer-prepared-statements.yml"
+      - "docker-compose/pasarguard-postgresql.yml"
+      - "docker-compose/pasarguard-timescaledb.yml"
+      - "pasarguard.sh"
+      - "tests/docker/pgbouncer_prepared_statements.sh"
+  workflow_dispatch:
+
+jobs:
+  prepared-statements:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        database:
+          - postgresql
+          - timescaledb
+        pgbouncer:
+          - ""
+          - edoburu/pgbouncer:v1.23.1-p3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: The panel's driver works through PgBouncer
+        env:
+          PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
+        run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
