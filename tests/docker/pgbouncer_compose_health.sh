@@ -40,10 +40,10 @@ EOF
 cp "$SCRIPTS_ROOT/docker-compose/pasarguard-${DATABASE}.yml" "$WORK_DIR/docker-compose.yml"
 {
     printf 'services:\n'
-    printf '  %s:\n    restart: "no"\n    ports: !reset []\n    volumes: !reset []\n    mem_limit: 384m\n' "$DATABASE"
-    printf '  pgbouncer:\n    restart: "no"\n    ports: !reset []\n    mem_limit: 64m\n'
+    printf '  %s:\n    restart: "no"\n    pull_policy: missing\n    ports: !reset []\n    volumes: !reset []\n    mem_limit: 384m\n' "$DATABASE"
+    printf '  pgbouncer:\n    restart: "no"\n    pull_policy: missing\n    ports: !reset []\n    mem_limit: 64m\n'
     [ -z "$BOUNCER_IMAGE" ] || printf '    image: %s\n' "$BOUNCER_IMAGE"
-    printf '  pasarguard:\n    image: %s\n    restart: "no"\n    command: ["sleep", "300"]\n' "$STAND_IN_IMAGE"
+    printf '  pasarguard:\n    image: %s\n    restart: "no"\n    pull_policy: missing\n    command: ["sleep", "300"]\n' "$STAND_IN_IMAGE"
     printf '    network_mode: !reset null\n    env_file: !reset []\n    volumes: !reset []\n    mem_limit: 64m\n'
     printf '    networks:\n      - pg_backend\n'
 } >"$WORK_DIR/docker-compose.override.yml"
