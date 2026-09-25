@@ -68,6 +68,14 @@ core-update-now)
     restart_command() { :; }
     (update_core_command)
     ;;
+hold-lock)
+    COMMAND="hold-lock-test"
+    acquire_node_env_lock || exit 91
+    printf '%s\n' "$$" >"$CASE_DIR/holder-pid"
+    : >"$CASE_DIR/lock-held"
+    sleep "$HOLD_SECONDS"
+    release_node_env_lock
+    ;;
 edit-env-now)
     detect_os() { :; }
     check_editor() { :; }
@@ -308,20 +316,72 @@ else
     fail "env lock: core-update did not write XRAY_EXECUTABLE_PATH with the lock free"
 fi
 
-setup_case edit-env-holds-the-lock
+setup_case edit-env-does-not-block-writers
 EDITOR_PROBE="$CASE_DIR/editor-probe"
 cat >"$CASE_DIR/editor.sh" <<EOF
 #!/usr/bin/env bash
 if flock -n "$ENV_FILE.lock" true; then echo free >"$EDITOR_PROBE"; else echo held >"$EDITOR_PROBE"; fi
+printf 'EDITED_BY_ADMIN = 1\n' >>"\$1"
 EOF
 chmod +x "$CASE_DIR/editor.sh"
 export EDITOR="$CASE_DIR/editor.sh"
 start_writer edit-env-now
 wait "$WRITER_PID"
-if [ "$(cat "$EDITOR_PROBE" 2>/dev/null)" = "held" ]; then
-    pass "edit-env holds the .env lock while the editor is open"
+edit_rc=$?
+if [ "$(cat "$EDITOR_PROBE" 2>/dev/null)" = "free" ]; then
+    pass "edit-env does not hold the .env lock while the editor is open, so geofiles, core-update and service-install are not blocked"
 else
-    fail "edit-env leaves .env unlocked while the editor is open, so an automated write can be lost on save"
+    fail "edit-env holds the .env lock for as long as the editor stays open"
+fi
+if [ "$edit_rc" -eq 0 ] && env_has "EDITED_BY_ADMIN = 1"; then
+    pass "edit-env saves the edit when nothing else changed .env meanwhile"
+else
+    fail "edit-env did not save an edit that nothing conflicted with (exit $edit_rc)"
+fi
+if find "$CASE_DIR" -maxdepth 1 -name '.env.edit*' | grep -q .; then
+    fail "edit-env left its working copies behind after a clean save"
+else
+    pass "edit-env removes its working copies after a clean save"
+fi
+
+setup_case edit-env-keeps-a-concurrent-write
+cat >"$CASE_DIR/editor.sh" <<EOF
+#!/usr/bin/env bash
+printf 'EDITED_BY_ADMIN = 1\n' >>"\$1"
+flock -w 3 "$ENV_FILE.lock" -c "printf 'XRAY_ASSETS_PATH = /var/lib/interleave/assets\\\\n' >>'$ENV_FILE'"
+EOF
+chmod +x "$CASE_DIR/editor.sh"
+export EDITOR="$CASE_DIR/editor.sh"
+start_writer edit-env-now
+wait "$WRITER_PID"
+edit_rc=$?
+if env_has "XRAY_ASSETS_PATH = /var/lib/interleave/assets" && ! env_has "EDITED_BY_ADMIN = 1"; then
+    pass "edit-env does not overwrite a .env write another pg-node command made while the editor was open"
+else
+    fail "edit-env saved over a .env write made while the editor was open"
+fi
+kept="$(find "$CASE_DIR" -maxdepth 1 -name '.env.edit*' ! -name '*original*' | head -1)"
+if [ "$edit_rc" -ne 0 ] && [ -n "$kept" ] && grep -qx "EDITED_BY_ADMIN = 1" "$kept"; then
+    pass "edit-env refuses the conflicting save and keeps the admin's edit in $kept"
+else
+    fail "edit-env lost the admin's edit or reported success on a conflict (exit $edit_rc)"
+fi
+unset EDITOR
+
+setup_case env-lock-names-its-holder
+export HOLD_SECONDS=4
+start_writer hold-lock
+HOLDER_PID=$WRITER_PID
+wait_for "$CASE_DIR/lock-held"
+export NODE_ENV_LOCK_WAIT_SECONDS=1
+WRITER_MODE=sync-now bash "$WRITER" >"$CASE_DIR/contender.out" 2>&1
+unset NODE_ENV_LOCK_WAIT_SECONDS HOLD_SECONDS
+wait "$HOLDER_PID"
+holder_pid="$(cat "$CASE_DIR/holder-pid" 2>/dev/null)"
+if [ -n "$holder_pid" ] && grep -q "pid $holder_pid" "$CASE_DIR/contender.out" && grep -q "hold-lock-test" "$CASE_DIR/contender.out"; then
+    pass "a command that cannot get the .env lock names the holder's pid and command"
+else
+    fail "the lock-timeout message does not name the holder: $(tr '\n' ' ' <"$CASE_DIR/contender.out")"
 fi
 
 [ "$FAILURES" -eq 0 ]
