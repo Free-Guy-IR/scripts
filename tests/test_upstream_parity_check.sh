@@ -96,5 +96,21 @@ expect pass "a decided release tag passes"
 
 printf 'branch\tghost\t0123456789abcdef0123456789abcdef01234567\tbogus\t\n' >>"$LEDGER"
 expect fail "a ledger row with an unknown decision or no detail fails the check"
+sed -i.bak '/ghost/d' "$LEDGER" && rm -f "$LEDGER.bak"
+expect pass "the ledger is valid again"
+
+(cd "$FORK" && UPSTREAM_REMOTE=nosuchremote PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+if [ $? -ne 0 ]; then pass "a wrong upstream remote name fails instead of passing with nothing to compare"; else fail "a wrong upstream remote name passed silently"; fi
+
+(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+if [ $? -ne 0 ]; then pass "a run without the open pull request list fails instead of skipping that check"; else fail "a run without the open pull request list passed silently"; fi
+
+(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$WORK_DIR/no-such-file" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+if [ $? -ne 0 ]; then pass "an unreadable open pull request list fails the check"; else fail "an unreadable open pull request list passed silently"; fi
+
+UNFETCHED="$WORK_DIR/unfetched"
+git clone -q "$FORK" "$UNFETCHED"
+(cd "$UNFETCHED" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+if [ $? -ne 0 ]; then pass "a clone that never fetched upstream fails instead of passing"; else fail "a clone that never fetched upstream passed silently"; fi
 
 [ "$FAILURES" -eq 0 ]
