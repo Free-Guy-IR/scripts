@@ -338,7 +338,7 @@ if [ "$edit_rc" -eq 0 ] && env_has "EDITED_BY_ADMIN = 1"; then
 else
     fail "edit-env did not save an edit that nothing conflicted with (exit $edit_rc)"
 fi
-if find "$CASE_DIR" -maxdepth 1 -name '.env.edit*' | grep -q .; then
+if find "$CASE_DIR" -maxdepth 1 -name '*.env.edit*' | grep -q .; then
     fail "edit-env left its working copies behind after a clean save"
 else
     pass "edit-env removes its working copies after a clean save"
@@ -360,7 +360,7 @@ if env_has "XRAY_ASSETS_PATH = /var/lib/interleave/assets" && ! env_has "EDITED_
 else
     fail "edit-env saved over a .env write made while the editor was open"
 fi
-kept="$(find "$CASE_DIR" -maxdepth 1 -name '.env.edit*' ! -name '*original*' | head -1)"
+kept="$(find "$CASE_DIR" -maxdepth 1 -name '*.env.edit*' ! -name '*original*' | head -1)"
 if [ "$edit_rc" -ne 0 ] && [ -n "$kept" ] && grep -qx "EDITED_BY_ADMIN = 1" "$kept"; then
     pass "edit-env refuses the conflicting save and keeps the admin's edit in $kept"
 else
