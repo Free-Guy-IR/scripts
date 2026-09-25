@@ -11,6 +11,7 @@ on:
       - "docker-compose/pasarguard-timescaledb.yml"
       - "pasarguard.sh"
       - "tests/docker/pgbouncer_prepared_statements.sh"
+      - "tests/docker/pgbouncer_compose_health.sh"
   pull_request:
     paths:
       - ".github/workflows/pgbouncer-prepared-statements.yml"
@@ -18,6 +19,7 @@ on:
       - "docker-compose/pasarguard-timescaledb.yml"
       - "pasarguard.sh"
       - "tests/docker/pgbouncer_prepared_statements.sh"
+      - "tests/docker/pgbouncer_compose_health.sh"
   workflow_dispatch:
 
 jobs:
@@ -44,3 +46,8 @@ jobs:
         env:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
         run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
+
+      - name: The compose stack comes up healthy and PgBouncer's console is read-only for the panel user
+        env:
+          PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
+        run: bash tests/docker/pgbouncer_compose_health.sh "${{ matrix.database }}"
