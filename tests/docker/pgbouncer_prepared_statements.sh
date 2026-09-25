@@ -22,7 +22,7 @@ postgresql | timescaledb) ;;
 esac
 
 cleanup() {
-    docker rm -f "$PG_CONTAINER" "$BOUNCER_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$PG_CONTAINER" "$BOUNCER_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$NETWORK" >/dev/null 2>&1 || true
     rm -rf "$WORK_DIR"
 }
