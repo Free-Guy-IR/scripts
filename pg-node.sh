@@ -377,16 +377,34 @@ acquire_node_env_lock() {
     fi
     if ! flock -w "$wait_seconds" 8; then
         exec 8>&-
-        colorized_echo red "$ENV_FILE is being changed by another $APP_NAME command; try again once it has finished."
+        colorized_echo red "$ENV_FILE is being changed by $(describe_node_env_lock_holder "$lock_path"); try again once it has finished."
         return 1
     fi
     NODE_ENV_LOCK_HELD=true
+    printf 'pid=%s since=%s command=%s\n' "$$" "$(date +%s)" "$APP_NAME ${COMMAND:-}" >"$lock_path" 2>/dev/null || true
+}
+
+describe_node_env_lock_holder() {
+    local lock_path="$1"
+    local holder pid since command age
+
+    holder=$(head -n 1 "$lock_path" 2>/dev/null || true)
+    pid=$(sed -n 's/^pid=\([0-9]*\) .*/\1/p' <<<"$holder")
+    since=$(sed -n 's/.* since=\([0-9]*\) .*/\1/p' <<<"$holder")
+    command=$(sed -n 's/.* command=//p' <<<"$holder")
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        printf 'another process that did not record itself in %s' "$lock_path"
+        return
+    fi
+    age=$(($(date +%s) - ${since:-0}))
+    printf "another %s command (pid %s: '%s', holding it for %ss)" "$APP_NAME" "$pid" "$command" "$age"
 }
 
 release_node_env_lock() {
     if [ "$NODE_ENV_LOCK_HELD" != true ]; then
         return 0
     fi
+    : >"$(node_env_lock_path)" 2>/dev/null || true
     flock -u 8 >/dev/null 2>&1 || true
     exec 8>&-
     NODE_ENV_LOCK_HELD=false
@@ -3429,11 +3447,50 @@ edit_env_command() {
     detect_os
     check_editor
     if [ -f "$ENV_FILE" ]; then
-        acquire_node_env_lock "${NODE_ENV_LOCK_WAIT_SECONDS:-10}" || exit 1
-        local editor_status=0
-        $EDITOR "$ENV_FILE" || editor_status=$?
+        local target target_dir target_name original working editor_status=0
+        target=$(node_env_write_target)
+        target_dir=$(dirname "$target")
+        target_name=$(basename "$target")
+        original=$(create_temp_file_in_dir "$target_dir" ".${target_name}.edit.original" "") || exit 1
+        working=$(create_temp_file_in_dir "$target_dir" ".${target_name}.edit" "") || {
+            rm -f "$original"
+            exit 1
+        }
+        if ! cat "$target" >"$original" || ! cat "$target" >"$working"; then
+            rm -f "$original" "$working"
+            exit 1
+        fi
+        $EDITOR "$working" || editor_status=$?
+        if [ "$editor_status" -ne 0 ]; then
+            rm -f "$original"
+            colorized_echo red "The editor exited with status $editor_status; $ENV_FILE was not changed. Your copy is in $working."
+            return "$editor_status"
+        fi
+        if cmp -s "$working" "$original"; then
+            rm -f "$original" "$working"
+            colorized_echo yellow "No changes to $ENV_FILE."
+            return 0
+        fi
+        if ! acquire_node_env_lock; then
+            rm -f "$original"
+            colorized_echo red "$ENV_FILE was not changed. Your edits are kept in $working."
+            exit 1
+        fi
+        if ! cmp -s "$target" "$original"; then
+            release_node_env_lock
+            rm -f "$original"
+            colorized_echo red "$ENV_FILE changed while you were editing it, so your edits were not saved over that change. They are kept in $working; merge them by hand."
+            exit 1
+        fi
+        if ! replace_node_env_file "$target" "$working"; then
+            release_node_env_lock
+            rm -f "$original"
+            colorized_echo red "Failed to save $ENV_FILE. Your edits are kept in $working."
+            exit 1
+        fi
         release_node_env_lock
-        return "$editor_status"
+        rm -f "$original" "$working"
+        colorized_echo green "Saved $ENV_FILE."
     else
         colorized_echo red "Environment file not found at $ENV_FILE"
         exit 1

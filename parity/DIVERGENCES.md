@@ -66,8 +66,14 @@ What e190d3d changes:
 - **How service-install rolls back `API_PORT`:** the write keeps before and after copies, taken under the `.env`
   lock at write time. The rollback restores the before copy only while `.env` still equals what the install
   wrote.
-- **One `.env` lock:** every pg-node `.env` writer (`API_PORT`, `sync_env_ssl_paths`, geofiles, and `edit-env`
-  for the whole editor session) takes a single flock on `$ENV_FILE.lock`.
+- **One `.env` lock:** every pg-node `.env` writer takes a single flock on `$ENV_FILE.lock`: `API_PORT`,
+  `sync_env_ssl_paths`, geofiles, core-update and install. `tests/test_env_writes_hold_lock.sh` fails on any
+  `.env` write in `pg-node.sh` outside the lock.
+  - The holder writes its pid, start time and command into the lock file. A command that times out on the lock
+    names that holder in its error.
+  - `edit-env` does not hold the lock while the editor is open. It edits a copy, then saves it under the lock
+    only if `.env` is still what the editor was opened on. Otherwise it refuses and keeps the admin's copy next to
+    `.env`.
 - **Test mocks:** the pull request's tests used mocks that wrote `.env` from `install_node_service_script` and
   `ensure_env_exists`. They now match the real functions.
 - **Test file:** `tests/test_node_service_env_interleaving.sh`.
