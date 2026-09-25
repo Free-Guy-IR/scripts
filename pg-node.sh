@@ -2005,6 +2005,10 @@ install_node() {
     fi
     colorized_echo blue "Fetching .env and compose file"
     colorized_echo cyan "  Command: curl -fsL $FILES_URL_PREFIX/.env.example -o $APP_DIR/.env"
+    if ! acquire_node_env_lock; then
+        colorized_echo red "Could not lock $APP_DIR/.env to write it; nothing was changed."
+        exit 1
+    fi
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the node
     # API_KEY written below is never world-readable.
     harden_secret_file "$APP_DIR/.env"
@@ -2067,6 +2071,7 @@ install_node() {
     ssl_key_env="${container_path}/certs/ssl_key.pem"
     sed -i "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|" "$APP_DIR/.env"
     sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
+    release_node_env_lock
     if [ "$node_version" != "latest" ]; then
         colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
         if yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
@@ -3377,6 +3382,10 @@ update_core_command() {
     # Ensure volumes match DATA_DIR when custom name is used
     service_name="node"
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
+    if ! acquire_node_env_lock; then
+        colorized_echo red "Xray-core $selected_version was installed, but XRAY_EXECUTABLE_PATH could not be written to $ENV_FILE."
+        exit 1
+    fi
     if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
         # Extract container path (everything after the colon)
         if [[ "$existing_volume" == *:* ]]; then
@@ -3396,6 +3405,7 @@ update_core_command() {
         sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${fallback_path}|" "$APP_DIR/.env"
         grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${fallback_path}" >>"$APP_DIR/.env"
     fi
+    release_node_env_lock
     # Restart node
     colorized_echo red "Restarting node..."
     restart_command -n --no-restart-service
