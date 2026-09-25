@@ -27,6 +27,14 @@ if [ ! -f "$ledger" ]; then
     report "ledger $ledger not found"
     exit 1
 fi
+if ! git rev-parse --verify -q "refs/remotes/${upstream_remote}/main" >/dev/null; then
+    report "refs/remotes/${upstream_remote}/main does not exist; fetch the upstream remote before checking parity"
+    exit 1
+fi
+if [ -z "$open_prs_file" ] || [ ! -r "$open_prs_file" ]; then
+    report "OPEN_PRS_FILE must name a readable list of open upstream pull requests (it may be empty)"
+    exit 1
+fi
 
 while IFS=$'\t' read -r kind name sha decision detail; do
     case "$kind" in
@@ -86,20 +94,18 @@ while IFS=' ' read -r ref tag_commit; do
 done < <(git for-each-ref --format='%(refname) %(*objectname)%(objectname)' 'refs/upstream-tags/' |
     awk '{ print $1, substr($2, 1, 40) }')
 
-if [ -n "$open_prs_file" ]; then
-    while IFS=$'\t' read -r number pr_head; do
-        [ -n "$number" ] || continue
-        if [ -n "$(ledger_decision pr "$number" "$pr_head")" ]; then
-            continue
-        fi
-        decided_sha="$(ledger_sha pr "$number")"
-        if [ -n "$decided_sha" ]; then
-            report "upstream pull request #$number moved from $decided_sha to $pr_head and must be decided again"
-        else
-            report "upstream pull request #$number ($pr_head) is open and has no decision"
-        fi
-    done <"$open_prs_file"
-fi
+while IFS=$'\t' read -r number pr_head; do
+    [ -n "$number" ] || continue
+    if [ -n "$(ledger_decision pr "$number" "$pr_head")" ]; then
+        continue
+    fi
+    decided_sha="$(ledger_sha pr "$number")"
+    if [ -n "$decided_sha" ]; then
+        report "upstream pull request #$number moved from $decided_sha to $pr_head and must be decided again"
+    else
+        report "upstream pull request #$number ($pr_head) is open and has no decision"
+    fi
+done <"$open_prs_file"
 
 if [ "$problems" -ne 0 ]; then
     printf 'PARITY: %d item(s) need a decision in %s\n' "$problems" "$ledger"
