@@ -56,6 +56,18 @@ geofiles-now)
     restart_command() { :; }
     (geofiles_command --iran)
     ;;
+core-update-now)
+    check_running_as_root() { :; }
+    get_xray_core() { selected_version="v99.0.0"; }
+    yq() {
+        case "$*" in
+        *"-r"*) printf '/var/lib/interleave:/var/lib/pg-node\n' ;;
+        *) return 0 ;;
+        esac
+    }
+    restart_command() { :; }
+    (update_core_command)
+    ;;
 edit-env-now)
     detect_os() { :; }
     check_editor() { :; }
@@ -267,6 +279,33 @@ if grep -q '^XRAY_ASSETS_PATH' "$ENV_FILE"; then
     pass "env lock: geofiles writes XRAY_ASSETS_PATH when the lock is free"
 else
     fail "env lock: geofiles did not write XRAY_ASSETS_PATH with the lock free"
+fi
+
+setup_case env-lock-holds-off-core-update
+printf 'services:\n  node:\n    volumes:\n      - /var/lib/interleave:/var/lib/pg-node\n' >"$CASE_DIR/docker-compose.yml"
+printf '# XRAY_EXECUTABLE_PATH = /usr/local/bin/xray\n' >>"$ENV_FILE"
+exec 7>>"$ENV_FILE.lock"
+flock 7
+export NODE_ENV_LOCK_WAIT_SECONDS=1
+start_writer core-update-now
+wait "$WRITER_PID"
+core_update_rc=$?
+flock -u 7
+exec 7>&-
+if grep -q '^XRAY_EXECUTABLE_PATH=' "$ENV_FILE"; then
+    fail "env lock: core-update rewrote XRAY_EXECUTABLE_PATH while another pg-node command held the .env lock"
+elif [ "$core_update_rc" -eq 0 ]; then
+    fail "env lock: core-update reported success although it could not update .env"
+else
+    pass "env lock: core-update fails loudly instead of writing while the .env lock is held"
+fi
+start_writer core-update-now
+wait "$WRITER_PID"
+unset NODE_ENV_LOCK_WAIT_SECONDS
+if grep -qx 'XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray' "$ENV_FILE"; then
+    pass "env lock: core-update writes XRAY_EXECUTABLE_PATH when the lock is free"
+else
+    fail "env lock: core-update did not write XRAY_EXECUTABLE_PATH with the lock free"
 fi
 
 setup_case edit-env-holds-the-lock
