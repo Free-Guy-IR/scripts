@@ -130,7 +130,53 @@ if grep -q "refs/heads/side" "$WORK_DIR/out" && grep -q "refs/tags/v1.0.1" "$WOR
 if [ $? -ne 0 ]; then pass "a wrong upstream remote name fails instead of passing with nothing to compare"; else fail "a wrong upstream remote name passed silently"; fi
 
 (cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
-if [ $? -ne 0 ]; then pass "a run without the open pull request list fails instead of skipping that check"; else fail "a run without the open pull request list passed silently"; fi
+if [ $? -ne 0 ]; then pass "a run that cannot tell which GitHub repository to ask for open pull requests fails instead of skipping that check"; else fail "a run with no way to list open pull requests passed silently"; fi
+
+STUB_BIN="$WORK_DIR/stub-bin"
+mkdir -p "$STUB_BIN"
+cat >"$STUB_BIN/curl" <<'STUB_EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_LOG"
+case "$STUB_MODE" in
+down) exit 22 ;;
+error-object) printf '{"message":"API rate limit exceeded"}\n' ;;
+one-pr) printf '[{"number":7,"head":{"sha":"1111111111111111111111111111111111111111"}}]\n' ;;
+two-pages)
+    case "$*" in
+    *"page=2"*) printf '[{"number":201,"head":{"sha":"2222222222222222222222222222222222222222"}}]\n' ;;
+    *)
+        printf '['
+        for n in $(seq 1 100); do
+            [ "$n" -gt 1 ] && printf ','
+            printf '{"number":%d,"head":{"sha":"3333333333333333333333333333333333333333"}}' "$n"
+        done
+        printf ']\n'
+        ;;
+    esac
+    ;;
+esac
+STUB_EOF
+chmod +x "$STUB_BIN/curl"
+export STUB_LOG="$WORK_DIR/stub.log"
+
+run_api_check() {
+    : >"$STUB_LOG"
+    (cd "$FORK" && PATH="$STUB_BIN:$PATH" STUB_MODE="$1" UPSTREAM_REMOTE=upstream UPSTREAM_GITHUB_REPO=Example/upstream PARITY_LEDGER="$LEDGER" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+}
+
+run_api_check one-pr
+if [ $? -ne 0 ] && grep -q '#7' "$WORK_DIR/out"; then pass "without OPEN_PRS_FILE the check lists open pull requests itself and fails on an undecided one"; else fail "without OPEN_PRS_FILE the check did not list the open pull requests itself"; fi
+if grep -q 'api.github.com/repos/Example/upstream/pulls?state=open' "$STUB_LOG"; then pass "the check asks the GitHub API of the upstream repository"; else fail "the check did not ask the GitHub API of the upstream repository"; fi
+printf 'pr\t7\t1111111111111111111111111111111111111111\tdeferred\twaiting for upstream review\n' >>"$LEDGER"
+run_api_check one-pr
+if [ $? -eq 0 ] && grep -q 'fetched from the GitHub API' "$WORK_DIR/out"; then pass "a decided pull request listed by the API passes and the output says where the list came from"; else fail "a decided pull request listed by the API did not pass, or the output hides where the list came from"; fi
+run_api_check down
+if [ $? -ne 0 ]; then pass "an unreachable GitHub API fails instead of passing with no pull requests"; else fail "an unreachable GitHub API passed as if upstream had no open pull requests"; fi
+run_api_check error-object
+if [ $? -ne 0 ]; then pass "a GitHub API error object fails instead of passing with no pull requests"; else fail "a GitHub API error object passed as if upstream had no open pull requests"; fi
+run_api_check two-pages
+if [ $? -ne 0 ] && grep -q '#201' "$WORK_DIR/out"; then pass "the check reads every page of open pull requests"; else fail "the check stopped after the first page of open pull requests"; fi
+sed -i.bak '/^pr\t7\t/d' "$LEDGER" && rm -f "$LEDGER.bak"
 
 (cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$WORK_DIR/no-such-file" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "an unreadable open pull request list fails the check"; else fail "an unreadable open pull request list passed silently"; fi
