@@ -1,0 +1,165 @@
+### flag mut_sed_e_i
+mut_sed_e_i() {
+    sed -E -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_tee_a
+mut_tee_a() {
+    echo X=1 | tee -a "$ENV_FILE" >/dev/null
+}
+### flag mut_fd_append
+mut_fd_append() {
+    printf 'X=1\n' 1>>"$ENV_FILE"
+}
+### flag mut_cp
+mut_cp() {
+    cp "$tmp" "$ENV_FILE"
+}
+### flag mut_install
+mut_install() {
+    install -m 600 "$tmp" "$ENV_FILE"
+}
+### flag mut_mv_unquoted
+mut_mv_unquoted() {
+    mv -f $tmp "$ENV_FILE"
+}
+### flag mut_quoted_app_dir
+mut_quoted_app_dir() {
+    sed -i "s/a/b/" "$APP_DIR"/.env
+}
+### flag mut_alias
+mut_alias() {
+    local f="$ENV_FILE"
+    sed -i "s/a/b/" "$f"
+}
+### flag mut_eval
+mut_eval() {
+    eval "sed -i s/a/b/ \"\$ENV_FILE\""
+}
+### flag mut_conditional_acquire
+mut_conditional_acquire() {
+    if [ -n "$x" ]; then
+        acquire_node_env_lock || exit 1
+    fi
+    sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_acquire_or_true
+mut_acquire_or_true() {
+    acquire_node_env_lock || true
+    sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_one_line
+mut_one_line() { sed -i "s/a/b/" "$ENV_FILE"; }
+### flag <top-level>
+sed -i "s/a/b/" "$ENV_FILE"
+### flag mut_clobber
+mut_clobber() {
+    printf 'X=1\n' >|"$ENV_FILE"
+}
+### flag mut_amp_redirect
+mut_amp_redirect() {
+    some_cmd &>"$ENV_FILE"
+}
+### flag mut_sed_in_place
+mut_sed_in_place() {
+    sed --in-place "s/a/b/" "$ENV_FILE"
+}
+### flag mut_persist_line
+mut_persist_line() {
+    persist_line "$ENV_FILE" "X=1"
+}
+### flag mut_truncate
+mut_truncate() {
+    truncate -s 0 "$ENV_FILE"
+}
+### flag mut_dd
+mut_dd() {
+    dd if="$tmp" of="$ENV_FILE" status=none
+}
+### flag mut_function_keyword
+function mut_function_keyword {
+    sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag inner_writer
+mut_nested_outer() {
+    inner_writer() {
+        sed -i "s/a/b/" "$ENV_FILE"
+    }
+    acquire_node_env_lock || return 1
+    release_node_env_lock
+}
+### flag mut_plain
+mut_plain() {
+    sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_write_after_release
+mut_write_after_release() {
+    acquire_node_env_lock || return 1
+    release_node_env_lock
+    printf 'x\n' >>"$ENV_FILE"
+}
+### flag mut_unlocked_helper
+mut_unlocked_helper() {
+    apply_node_env_ssl_paths
+}
+### flag mut_unguarded_acquire
+mut_unguarded_acquire() {
+    acquire_node_env_lock
+    sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_rm
+mut_rm() {
+    rm -f "$ENV_FILE"
+}
+### flag mut_chmod
+mut_chmod() {
+    chmod 644 "$ENV_FILE"
+}
+### ok ok_locked_forms
+ok_locked_forms() {
+    acquire_node_env_lock || return 1
+    sed -E -i "s/a/b/" "$ENV_FILE"
+    echo X=1 | tee -a "$ENV_FILE" >/dev/null
+    cp "$tmp" "$ENV_FILE"
+    mv -f $tmp "$ENV_FILE"
+    sed -i "s/a/b/" "$APP_DIR"/.env
+    printf 'X=1\n' >|"$ENV_FILE"
+    dd if="$tmp" of="$ENV_FILE" status=none
+    replace_node_env_file "$target" "$copy"
+    if false; then
+        release_node_env_lock
+        rm -f "$scratch"
+        exit 1
+    fi
+    echo x >>"$ENV_FILE"
+    release_node_env_lock
+}
+### ok ok_if_not_acquire
+ok_if_not_acquire() {
+    if ! acquire_node_env_lock; then
+        colorized_echo red "could not lock $ENV_FILE"
+        exit 1
+    fi
+    sed -i "s/a/b/" "$ENV_FILE"
+    release_node_env_lock
+}
+### ok ok_block_scoped
+ok_block_scoped() {
+    if [ -n "$x" ]; then
+        if ! acquire_node_env_lock; then
+            exit 1
+        fi
+        sed -i "s/a/b/" "$ENV_FILE"
+        release_node_env_lock
+    fi
+}
+### ok ok_reads
+ok_reads() {
+    [ -f "$ENV_FILE" ] || return 0
+    grep -q '^A=' "$ENV_FILE"
+    current=$(grep -E '^B=' "$ENV_FILE" | head -n1 | sed "s/^B=//")
+    cat "$ENV_FILE" >"$scratch"
+    cmp -s "$ENV_FILE" "$scratch"
+    while read -r line; do :; done <"$ENV_FILE"
+    colorized_echo red "Environment file not found at $ENV_FILE"
+    printf '%s\n' "${ENV_FILE}.lock"
+}
