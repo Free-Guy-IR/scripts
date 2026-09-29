@@ -125,17 +125,19 @@ transaction_test_install_node_service_script_definition=$(declare -f install_nod
 
 echo "=== test_node_service_transaction_guard.sh ==="
 
-# Secret-bearing environment snapshots remain owner-readable even if a legacy
-# installation left the source .env world-readable.
-setup_case secure-env-backup
-chmod 644 "$ENV_FILE"
+setup_case env-is-never-snapshotted
 acquire_node_serviced_update_lock
-begin_node_service_transaction
-env_backup="${NODE_SERVICE_TRANSACTION_BACKUPS[0]}"
-[ "$(stat -c '%a' "$env_backup")" = "600" ] && pass "backup security: .env snapshot is 0600" || fail "backup security: .env snapshot is 0600"
-abort_node_service_transaction
-assert_no_backups "backup security: snapshots cleaned"
-assert_lock_released "backup security: flock released"
+set +e
+(begin_node_service_transaction) >/dev/null 2>&1
+no_path_status=$?
+(begin_node_service_transaction "$SERVICE_UNIT" "$ENV_FILE") >/dev/null 2>&1
+env_path_status=$?
+set -e
+release_node_serviced_update_lock
+[ "$no_path_status" -ne 0 ] && pass "no .env snapshot: a transaction must name what it snapshots" || fail "no .env snapshot: a transaction must name what it snapshots"
+[ "$env_path_status" -ne 0 ] && pass "no .env snapshot: .env is refused, so no rollback can restore it over another writer's edit" || fail "no .env snapshot: .env is refused, so no rollback can restore it over another writer's edit"
+assert_no_backups "no .env snapshot: nothing was copied"
+assert_lock_released "no .env snapshot: flock released"
 
 # Deliver a real TERM after binary activation. The public command runs the
 # guard in a subshell, so its traps cannot replace the caller's traps.
@@ -202,9 +204,8 @@ service_installed() { return 0; }
 setup_case errexit
 unexpected_failure() (
     acquire_node_serviced_update_lock
-    begin_node_service_transaction
+    begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
     activate_node_serviced_binary "$VALID_BINARY"
-    printf 'new-env\n' > "$ENV_FILE"
     printf 'new-unit\n' > "$SERVICE_UNIT"
     false
     commit_node_service_transaction
@@ -216,7 +217,7 @@ wait "$failure_pid"
 failure_status=$?
 set -e
 [ "$failure_status" -ne 0 ] && pass "errexit: failure propagated" || fail "errexit: failure propagated"
-assert_file "$ENV_FILE" "old-env" "errexit: environment snapshot restored"
+assert_file "$ENV_FILE" "old-env" "errexit: environment untouched"
 assert_file "$SERVICE_UNIT" "old-unit" "errexit: unit snapshot restored"
 grep -q 'old-binary' "$SERVICE_BINARY_PATH" && pass "errexit: binary snapshot restored" || fail "errexit: binary snapshot restored"
 assert_no_backups "errexit: backups removed"
@@ -368,28 +369,22 @@ assert_lock_released "API_PORT append failure: flock released"
 # exact relative link text as well as referent content changed through the link.
 setup_case symlink
 mkdir -p "$CASE_DIR/targets"
-mv "$ENV_FILE" "$CASE_DIR/targets/env"
 mv "$SERVICE_UNIT" "$CASE_DIR/targets/unit"
 mv "$SERVICE_BINARY_PATH" "$CASE_DIR/targets/binary"
-ln -s targets/env "$ENV_FILE"
 ln -s targets/unit "$SERVICE_UNIT"
 ln -s targets/binary "$SERVICE_BINARY_PATH"
 acquire_node_serviced_update_lock
-begin_node_service_transaction
+begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
 mark_node_service_transaction_mutation_started
-printf 'changed-target-env\n' > "$CASE_DIR/targets/env"
 printf 'changed-target-unit\n' > "$CASE_DIR/targets/unit"
 printf '\177ELFchanged-target-binary\n' > "$CASE_DIR/targets/binary"
-rm -f "$ENV_FILE" "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
-printf 'replacement-env\n' > "$ENV_FILE"
+rm -f "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
 printf 'replacement-unit\n' > "$SERVICE_UNIT"
 printf '\177ELFreplacement-binary\n' > "$SERVICE_BINARY_PATH"
 assert_true "symlink: first rollback succeeds" rollback_node_service_transaction
 assert_true "symlink: repeated rollback is idempotent" rollback_node_service_transaction
-[ -L "$ENV_FILE" ] && [ "$(readlink "$ENV_FILE")" = targets/env ] && pass "symlink: environment link topology restored" || fail "symlink: environment link topology restored"
 [ -L "$SERVICE_UNIT" ] && [ "$(readlink "$SERVICE_UNIT")" = targets/unit ] && pass "symlink: unit link topology restored" || fail "symlink: unit link topology restored"
 [ -L "$SERVICE_BINARY_PATH" ] && [ "$(readlink "$SERVICE_BINARY_PATH")" = targets/binary ] && pass "symlink: binary link topology restored" || fail "symlink: binary link topology restored"
-assert_file "$CASE_DIR/targets/env" "old-env" "symlink: environment referent restored"
 assert_file "$CASE_DIR/targets/unit" "old-unit" "symlink: unit referent restored"
 grep -q 'old-binary' "$CASE_DIR/targets/binary" && pass "symlink: binary referent restored" || fail "symlink: binary referent restored"
 finish_node_service_transaction
@@ -400,27 +395,25 @@ assert_lock_released "symlink: flock released"
 # unfinished entries and succeeds instead of returning failure permanently.
 setup_case retry
 acquire_node_serviced_update_lock
-begin_node_service_transaction
+begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
 mark_node_service_transaction_mutation_started
-printf 'new-env\n' > "$ENV_FILE"
 printf 'new-unit\n' > "$SERVICE_UNIT"
 printf '\177ELFnew-binary\n' > "$SERVICE_BINARY_PATH"
 MV_FAILURE_MARKER="$CASE_DIR/mv-failed-once"
-ENV_BACKUP_TO_FAIL="${NODE_SERVICE_TRANSACTION_BACKUPS[0]}"
+UNIT_BACKUP_TO_FAIL="${NODE_SERVICE_TRANSACTION_BACKUPS[0]}"
 cp() {
-    if [ "${2:-}" = "$ENV_BACKUP_TO_FAIL" ] && [ ! -e "$MV_FAILURE_MARKER" ]; then
+    if [ "${2:-}" = "$UNIT_BACKUP_TO_FAIL" ] && [ ! -e "$MV_FAILURE_MARKER" ]; then
         : > "$MV_FAILURE_MARKER"
         return 1
     fi
     command cp "$@"
 }
 assert_false "retry: first rollback reports restore failure" rollback_node_service_transaction
-env_snapshot_index=0
-env_backup_path="${NODE_SERVICE_TRANSACTION_BACKUPS[env_snapshot_index]}"
-[ -n "$env_backup_path" ] && [ -e "$env_backup_path" ] && pass "retry: failed restore retains backup handle" || fail "retry: failed restore retains backup handle"
+unit_snapshot_index=0
+unit_backup_path="${NODE_SERVICE_TRANSACTION_BACKUPS[unit_snapshot_index]}"
+[ -n "$unit_backup_path" ] && [ -e "$unit_backup_path" ] && pass "retry: failed restore retains backup handle" || fail "retry: failed restore retains backup handle"
 assert_true "retry: second rollback succeeds" rollback_node_service_transaction
-assert_file "$ENV_FILE" "old-env" "retry: environment restored on second attempt"
-assert_file "$SERVICE_UNIT" "old-unit" "retry: completed unit restore remains intact"
+assert_file "$SERVICE_UNIT" "old-unit" "retry: unit restored on second attempt"
 grep -q 'old-binary' "$SERVICE_BINARY_PATH" && pass "retry: completed binary restore remains intact" || fail "retry: completed binary restore remains intact"
 unset -f cp
 finish_node_service_transaction
@@ -434,9 +427,8 @@ setup_case first-install-disable-failure
 rm -f "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
 service_installed() { return 1; }
 acquire_node_serviced_update_lock
-begin_node_service_transaction
+begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
 mark_node_service_transaction_mutation_started
-printf 'new-env\n' > "$ENV_FILE"
 printf 'new-unit\n' > "$SERVICE_UNIT"
 printf '\177ELFnew-binary\n' > "$SERVICE_BINARY_PATH"
 DISABLE_FAILURE=true
@@ -445,7 +437,7 @@ first_install_rollback_output=$(abort_node_service_transaction 2>&1)
 first_install_rollback_status=$?
 set -e
 [ "$first_install_rollback_status" -ne 0 ] && pass "first-install disable failure: rollback reports failure" || fail "first-install disable failure: rollback reports failure"
-assert_file "$ENV_FILE" "old-env" "first-install disable failure: environment restored"
+assert_file "$ENV_FILE" "old-env" "first-install disable failure: environment untouched"
 [ ! -e "$SERVICE_UNIT" ] && [ ! -e "$SERVICE_BINARY_PATH" ] && pass "first-install disable failure: new artifacts removed" || fail "first-install disable failure: new artifacts removed"
 if [[ "$first_install_rollback_output" == *"may remain loaded or active"* ]]; then pass "first-install disable failure: orphaned unit is reported"; else fail "first-install disable failure: orphaned unit is reported"; fi
 if find "$CASE_DIR" -type f -name '.*.transaction.*' -print -quit | grep -q .; then pass "first-install disable failure: snapshots retained"; else fail "first-install disable failure: snapshots retained"; fi
@@ -633,9 +625,8 @@ assert_lock_released "service query signal: flock released"
 setup_case commit
 committed_then_failed() (
     acquire_node_serviced_update_lock
-    begin_node_service_transaction
+    begin_node_service_transaction "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
     mark_node_service_transaction_mutation_started
-    printf 'committed-env\n' > "$ENV_FILE"
     printf 'committed-unit\n' > "$SERVICE_UNIT"
     install -m 755 "$VALID_BINARY" "$SERVICE_BINARY_PATH"
     commit_node_service_transaction
@@ -648,7 +639,6 @@ wait "$commit_pid"
 commit_status=$?
 set -e
 [ "$commit_status" -eq 77 ] && pass "commit: later failure propagated" || fail "commit: later failure propagated"
-assert_file "$ENV_FILE" "committed-env" "commit: environment not rolled back"
 assert_file "$SERVICE_UNIT" "committed-unit" "commit: unit not rolled back"
 grep -q 'new-binary' "$SERVICE_BINARY_PATH" && pass "commit: binary not rolled back" || fail "commit: binary not rolled back"
 assert_no_backups "commit: backups removed"
