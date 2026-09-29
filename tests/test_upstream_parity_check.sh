@@ -99,6 +99,33 @@ expect fail "a ledger row with an unknown decision or no detail fails the check"
 sed -i.bak '/ghost/d' "$LEDGER" && rm -f "$LEDGER.bak"
 expect pass "the ledger is valid again"
 
+git_in "$UPSTREAM" commit -q --allow-empty -m "fix: landed after the last fetch"
+expect fail "a stale local copy of upstream main fails instead of passing on old refs"
+if grep -q "refs/heads/main" "$WORK_DIR/out"; then pass "the stale failure names the upstream ref that moved"; else fail "the stale failure does not name the upstream ref that moved"; fi
+refresh
+git_in "$FORK" merge -q --no-edit upstream/main
+expect pass "refreshing and merging upstream main clears the stale failure"
+
+git_in "$UPSTREAM" tag -a v1.0.2 -m "annotated release"
+refresh
+expect pass "an annotated upstream tag fetched as-is passes"
+
+git_in "$UPSTREAM" branch gone
+refresh
+expect pass "a new upstream branch already in the fork's history passes"
+git_in "$UPSTREAM" branch -q -D gone
+expect fail "a local ref for a branch deleted upstream fails until it is pruned"
+git -C "$FORK" fetch -q --prune --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*' '+refs/tags/*:refs/upstream-tags/*'
+expect pass "pruning the deleted branch clears the failure"
+
+PARTIAL="$WORK_DIR/partial"
+git clone -q "$FORK" "$PARTIAL"
+git -C "$PARTIAL" remote add upstream "$UPSTREAM"
+git -C "$PARTIAL" fetch -q upstream main
+(cd "$PARTIAL" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+if [ $? -ne 0 ]; then pass "a clone that fetched only upstream main fails instead of passing"; else fail "a clone that fetched only upstream main passed although it never saw the other branches and tags"; fi
+if grep -q "refs/heads/side" "$WORK_DIR/out" && grep -q "refs/tags/v1.0.1" "$WORK_DIR/out"; then pass "the partial-fetch failure names the missing branch and tag"; else fail "the partial-fetch failure does not name the missing branch and tag"; fi
+
 (cd "$FORK" && UPSTREAM_REMOTE=nosuchremote PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "a wrong upstream remote name fails instead of passing with nothing to compare"; else fail "a wrong upstream remote name passed silently"; fi
 
