@@ -8,6 +8,7 @@ CLIENT_IMAGE="${PGB_TEST_CLIENT_IMAGE:-python:3.12-slim}"
 CLIENT_PIP="${PGB_TEST_CLIENT_PIP:-sqlalchemy[asyncio]==2.0.52 asyncpg==0.31.0}"
 TASKS="${PGB_TEST_TASKS:-16}"
 ROUNDS="${PGB_TEST_ROUNDS:-40}"
+HOST_PATH="${PGB_TEST_HOST_PATH:-false}"
 WORK_DIR="$(mktemp -d)"
 NETWORK="${PREFIX}-net"
 PG_CONTAINER="${PREFIX}-db"
@@ -17,9 +18,15 @@ case "$DATABASE" in
 postgresql | timescaledb) ;;
 *)
     printf 'Usage: %s <postgresql|timescaledb>\n' "$0" >&2
+    rmdir "$WORK_DIR"
     exit 2
     ;;
 esac
+if [ "$HOST_PATH" = true ] && [ "${CI:-}" != true ]; then
+    printf 'PGB_TEST_HOST_PATH publishes 127.0.0.1:6432 and runs the client on the host network; it runs only on a CI runner (CI=true)\n' >&2
+    rmdir "$WORK_DIR"
+    exit 2
+fi
 
 cleanup() {
     docker rm -f -v "$PG_CONTAINER" "$BOUNCER_CONTAINER" >/dev/null 2>&1 || true
@@ -65,7 +72,21 @@ if [ -z "$url_line" ]; then
 fi
 database_url="$(db_driver_scheme="postgresql+asyncpg" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" DB_PORT=6432 DB_NAME="$DB_NAME" \
     bash -c "${url_line#"${url_line%%[![:space:]]*}"}; printf '%s' \"\$SQLALCHEMY_DATABASE_URL\"")"
-database_url="${database_url/@127.0.0.1:/@${BOUNCER_CONTAINER}:}"
+bouncer_publish=()
+if [ "$HOST_PATH" = true ]; then
+    mapfile -t bouncer_ports < <(jq -r '.services.pgbouncer.ports // [] | .[] | "\(.host_ip // "0.0.0.0"):\(.published):\(.target)"' "$WORK_DIR/compose.json")
+    if [ "${#bouncer_ports[@]}" -eq 0 ]; then
+        printf 'FAIL: %s: the compose file publishes no PgBouncer port for the host-network panel to reach\n' "$DATABASE"
+        exit 1
+    fi
+    for port in "${bouncer_ports[@]}"; do bouncer_publish+=(-p "$port"); done
+    client_network=(--network host)
+    path_label="the published PgBouncer port from the host network, as the panel connects"
+else
+    database_url="${database_url/@127.0.0.1:/@${BOUNCER_CONTAINER}:}"
+    client_network=(--network "$NETWORK")
+    path_label="PgBouncer on a private network"
+fi
 
 printf 'database image: %s\npgbouncer image: %s\npgbouncer settings: %s\npanel URL options: %s\n' \
     "$db_image" "$bouncer_image" "$(printf '%s ' "${bouncer_env[@]}" | grep -oE '(POOL_MODE|MAX_PREPARED_STATEMENTS|IGNORE_STARTUP_PARAMETERS)=[^ ]*' | tr '\n' ' ')" \
@@ -77,9 +98,21 @@ for _ in $(seq 1 60); do
     docker exec "$PG_CONTAINER" pg_isready -q -U "$DB_USER" -d "$DB_NAME" && break
     sleep 1
 done
-docker run -d --name "$BOUNCER_CONTAINER" --network "$NETWORK" --memory 64m "${bouncer_env_args[@]}" "$bouncer_image" >/dev/null
+docker run -d --name "$BOUNCER_CONTAINER" --network "$NETWORK" --memory 64m ${bouncer_publish[@]+"${bouncer_publish[@]}"} "${bouncer_env_args[@]}" "$bouncer_image" >/dev/null
 sleep 3
 docker exec "$BOUNCER_CONTAINER" sh -c 'pgbouncer --version 2>/dev/null | head -1' || true
+if [ "$HOST_PATH" = true ]; then
+    published="$(docker port "$BOUNCER_CONTAINER" 6432/tcp || true)"
+    printf 'pgbouncer published on: %s\n' "$(tr '\n' ' ' <<<"$published")"
+    if [ -z "$published" ]; then
+        printf 'FAIL: %s: PgBouncer port 6432 was not published\n' "$DATABASE"
+        exit 1
+    fi
+    if grep -qvE '^127\.0\.0\.1:' <<<"$published"; then
+        printf 'FAIL: %s: PgBouncer is published beyond the loopback address\n' "$DATABASE"
+        exit 1
+    fi
+fi
 
 cat >"$WORK_DIR/workload.py" <<'PYEOF'
 import asyncio
@@ -136,15 +169,15 @@ asyncio.run(main())
 PYEOF
 
 set +e
-docker run -i --rm --network "$NETWORK" --memory 384m \
+docker run -i --rm "${client_network[@]}" --memory 384m \
     -e DATABASE_URL="$database_url" -e TASKS="$TASKS" -e ROUNDS="$ROUNDS" -e PIP_PACKAGES="$CLIENT_PIP" \
     --entrypoint sh "$CLIENT_IMAGE" \
     -c 'python -c "import sqlalchemy, asyncpg" 2>/dev/null || pip install -q --disable-pip-version-check $PIP_PACKAGES >/dev/null 2>&1 </dev/null; python -c "import sqlalchemy, asyncpg; print(\"client: sqlalchemy\", sqlalchemy.__version__, \"asyncpg\", asyncpg.__version__)" </dev/null; python -' <"$WORK_DIR/workload.py"
 status=$?
 set -e
 if [ "$status" -eq 0 ]; then
-    printf 'PASS: %s through PgBouncer: every transaction succeeded\n' "$DATABASE"
+    printf 'PASS: %s through %s: every transaction succeeded\n' "$DATABASE" "$path_label"
 else
-    printf 'FAIL: %s through PgBouncer: the panel driver hit errors (exit %s)\n' "$DATABASE" "$status"
+    printf 'FAIL: %s through %s: the panel driver hit errors (exit %s)\n' "$DATABASE" "$path_label" "$status"
 fi
 exit "$status"

@@ -47,6 +47,12 @@ jobs:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
         run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
 
+      - name: The panel's URL works from the host network through the published 127.0.0.1:6432
+        env:
+          PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
+          PGB_TEST_HOST_PATH: "true"
+        run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
+
       - name: The compose stack comes up healthy and PgBouncer's console is read-only for the panel user
         env:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
