@@ -84,11 +84,27 @@ What e190d3d changes:
 - **One `.env` lock:** every pg-node `.env` writer takes a single flock on `$ENV_FILE.lock`: `API_PORT`,
   `sync_env_ssl_paths`, geofiles, core-update and install. `tests/test_env_writes_hold_lock.sh` fails on any
   `.env` write in `pg-node.sh` outside the lock.
+  - The analyser, `tests/env_lock_analyzer.py`, treats every line that names `.env` as a write unless it is a
+    known read. It models conditional acquires, and flags a `curl` without `--max-time` while the lock is held.
+  - `tests/fixtures/env_lock_probes.txt` holds one unlocked write per form the reviews found. The analyser must
+    flag each of them before it checks `pg-node.sh`.
+  - `begin_node_service_transaction` refuses an empty path list and refuses `.env`. Changes to `.env` go
+    through the lock, never through a snapshot and restore.
+- **Stage, then apply under the lock:** core-update and install stage their downloads and certificate first,
+  and change the live files only after taking the lock. This covers the Xray-core files, the certificate and
+  key, `.env` and the compose file.
+  - A lock timeout, a failed download or a rejected prompt therefore changes nothing, and the staging directory
+    is removed on exit.
+  - No network call and no prompt runs while the lock is held.
+  - Before this, a failed core-update had already replaced the core, and a reinstall that stopped on a busy port
+    had already replaced the certificate.
   - The holder writes its pid, start time and command into the lock file. A command that times out on the lock
     names that holder in its error.
   - `edit-env` does not hold the lock while the editor is open. It edits a copy, then saves it under the lock
     only if `.env` is still what the editor was opened on. Otherwise it refuses and keeps the admin's copy next to
     `.env`.
+  - A kept copy is named `..env.edit-*`. It holds the whole `.env`, including `API_KEY`, with mode 0600.
+    Nothing ever deletes it: the admin removes it after merging by hand.
 - **Test mocks:** the pull request's tests used mocks that wrote `.env` from `install_node_service_script` and
   `ensure_env_exists`. They now match the real functions.
 - **Test file:** `tests/test_node_service_env_interleaving.sh`.
