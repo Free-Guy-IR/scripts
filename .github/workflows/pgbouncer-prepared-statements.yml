@@ -12,6 +12,7 @@ on:
       - "pasarguard.sh"
       - "tests/docker/pgbouncer_prepared_statements.sh"
       - "tests/docker/pgbouncer_compose_health.sh"
+      - "tests/run_isolated.sh"
   pull_request:
     paths:
       - ".github/workflows/pgbouncer-prepared-statements.yml"
@@ -20,6 +21,7 @@ on:
       - "pasarguard.sh"
       - "tests/docker/pgbouncer_prepared_statements.sh"
       - "tests/docker/pgbouncer_compose_health.sh"
+      - "tests/run_isolated.sh"
   workflow_dispatch:
 
 jobs:
@@ -45,15 +47,15 @@ jobs:
       - name: The panel's driver works through PgBouncer
         env:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
-        run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
+        run: bash tests/run_isolated.sh tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
 
       - name: The panel's URL works from the host network through the published 127.0.0.1:6432
         env:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
           PGB_TEST_HOST_PATH: "true"
-        run: bash tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
+        run: bash tests/run_isolated.sh tests/docker/pgbouncer_prepared_statements.sh "${{ matrix.database }}"
 
       - name: The compose stack comes up healthy and PgBouncer's console is read-only for the panel user
         env:
           PGB_TEST_BOUNCER_IMAGE: ${{ matrix.pgbouncer }}
-        run: bash tests/docker/pgbouncer_compose_health.sh "${{ matrix.database }}"
+        run: bash tests/run_isolated.sh tests/docker/pgbouncer_compose_health.sh "${{ matrix.database }}"
