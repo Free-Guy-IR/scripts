@@ -6,9 +6,7 @@ permissions:
 on:
   push:
     paths:
-      - ".github/workflows/fork-regression-tests.yml"
-      - ".github/workflows/pasarguard-standalone-release.yml"
-      - ".github/workflows/pg-node-standalone-release.yml"
+      - ".github/workflows/**"
       - "pasarguard.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -16,22 +14,10 @@ on:
       - "lib/**"
       - "iran-sanction/**"
       - "tools/**"
-      - "tests/test_fresh_dump_in_archive.sh"
-      - "tests/test_restore_failure_restarts_panel.sh"
-      - "tests/test_fork_script_repo.sh"
-      - "tests/test_node_serviced_checksum.sh"
-      - "tests/test_fork_panel_image_detection.sh"
-      - "tests/test_node_service_unit_mode.sh"
-      - "tests/test_node_service_lock_only_when_installed.sh"
-      - "tests/test_standalone_commit_bake.sh"
-      - "tests/test_node_service_env_interleaving.sh"
-      - "tests/test_fork_workflow_hardening.sh"
-      - ".github/workflows/upstream-parity.yml"
+      - "tests/**"
   pull_request:
     paths:
-      - ".github/workflows/fork-regression-tests.yml"
-      - ".github/workflows/pasarguard-standalone-release.yml"
-      - ".github/workflows/pg-node-standalone-release.yml"
+      - ".github/workflows/**"
       - "pasarguard.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
@@ -39,17 +25,7 @@ on:
       - "lib/**"
       - "iran-sanction/**"
       - "tools/**"
-      - "tests/test_fresh_dump_in_archive.sh"
-      - "tests/test_restore_failure_restarts_panel.sh"
-      - "tests/test_fork_script_repo.sh"
-      - "tests/test_node_serviced_checksum.sh"
-      - "tests/test_fork_panel_image_detection.sh"
-      - "tests/test_node_service_unit_mode.sh"
-      - "tests/test_node_service_lock_only_when_installed.sh"
-      - "tests/test_standalone_commit_bake.sh"
-      - "tests/test_node_service_env_interleaving.sh"
-      - "tests/test_fork_workflow_hardening.sh"
-      - ".github/workflows/upstream-parity.yml"
+      - "tests/**"
   workflow_dispatch:
 
 jobs:
@@ -94,6 +70,9 @@ jobs:
 
       - name: node-serviced rollbacks keep concurrent .env edits
         run: bash tests/test_node_service_env_interleaving.sh
+
+      - name: Every .env write in pg-node.sh holds the .env lock
+        run: bash tests/test_env_writes_hold_lock.sh
 
       - name: Fork workflows pin their actions and drop the job token
         run: bash tests/test_fork_workflow_hardening.sh

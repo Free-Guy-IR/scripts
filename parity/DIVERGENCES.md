@@ -109,6 +109,14 @@ What e190d3d changes:
   `ensure_env_exists`. They now match the real functions.
 - **Test file:** `tests/test_node_service_env_interleaving.sh`.
 
+## Small fixes to upstream functions
+
+- **`is_port_occupied` (69fde31):** it reads the port list from a here-string instead of `echo | grep -q`.
+  - Under `set -o pipefail`, `echo` could take SIGPIPE after `grep -q` had matched and exited, and the match
+    became a miss.
+  - `tests/unit_pgnode.sh` runs with `pipefail`, which is why "port 80 is busy" failed now and then.
+  - The scripts themselves do not set `pipefail`, so installs were not affected.
+
 ## Version banner and standalone bundles
 
 **What upstream 81237a3 and 152f09d do:** they print the commit a script runs from. The fork keeps the banner,
@@ -140,5 +148,6 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_node_service_lock_only_when_installed.sh`
 - `test_standalone_commit_bake.sh`
 - `test_node_service_env_interleaving.sh`
+- `test_env_writes_hold_lock.sh`
 - `test_upstream_parity_check.sh`
 - `test_fork_workflow_hardening.sh`
