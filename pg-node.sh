@@ -828,7 +828,21 @@ node_service_transaction_guard() {
 }
 
 begin_node_service_transaction() {
-    local service_query_status=0 state_query_status=0
+    local service_query_status=0 state_query_status=0 requested_path
+
+    if [ "$#" -eq 0 ]; then
+        colorized_echo red "A $SERVICE_NAME transaction must name the files it snapshots."
+        return 1
+    fi
+    local env_real requested_real
+    env_real=$(readlink -f "$ENV_FILE" 2>/dev/null || true)
+    for requested_path in "$@"; do
+        requested_real=$(readlink -f "$requested_path" 2>/dev/null || true)
+        if [ "$requested_path" = "$ENV_FILE" ] || { [ -n "$env_real" ] && [ "$requested_real" = "$env_real" ]; }; then
+            colorized_echo red "$ENV_FILE is never snapshotted; changes to it go through the .env lock."
+            return 1
+        fi
+    done
 
     NODE_SERVICE_TRANSACTION_ACTIVE=true
     NODE_SERVICE_TRANSACTION_COMMITTED=false
@@ -852,9 +866,6 @@ begin_node_service_transaction() {
     trap 'node_service_transaction_guard INT "$?"' INT
     trap 'node_service_transaction_guard TERM "$?"' TERM
 
-    if [ "$#" -eq 0 ]; then
-        set -- "$ENV_FILE" "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
-    fi
     local snapshot_path
     for snapshot_path in "$@"; do
         snapshot_node_service_path "$snapshot_path" || return 1
