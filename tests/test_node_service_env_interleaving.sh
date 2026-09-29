@@ -58,7 +58,11 @@ geofiles-now)
     ;;
 core-update-now)
     check_running_as_root() { :; }
-    get_xray_core() { selected_version="v99.0.0"; }
+    get_xray_core() {
+        selected_version="v99.0.0"
+        mkdir -p "${2:-$DATA_DIR/xray-core}"
+        printf 'xray v99.0.0\n' >"${2:-$DATA_DIR/xray-core}/xray"
+    }
     yq() {
         case "$*" in
         *"-r"*) printf '/var/lib/interleave:/var/lib/pg-node\n' ;;
@@ -75,6 +79,31 @@ hold-lock)
     : >"$CASE_DIR/lock-held"
     sleep "$HOLD_SECONDS"
     release_node_env_lock
+    ;;
+install-now)
+    check_running_as_root() { :; }
+    curl() {
+        local out=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+            -o) out="$2"; shift 2 ;;
+            *) shift ;;
+            esac
+        done
+        [ -n "$out" ] && printf 'SERVICE_PORT = 62050\nAPI_KEY = \n# SERVICE_PROTOCOL = "grpc"\nSSL_CERT_FILE = /var/lib/pg-node/certs/ssl_cert.pem\nSSL_KEY_FILE = /var/lib/pg-node/certs/ssl_key.pem\n' >"$out"
+        return 0
+    }
+    gen_self_signed_cert() {
+        printf 'regenerated-cert\n' >"$SSL_CERT_FILE"
+        printf 'regenerated-key\n' >"$SSL_KEY_FILE"
+        chmod 600 "$SSL_KEY_FILE"
+    }
+    get_occupied_ports() { OCCUPIED_PORTS=""; }
+    is_port_occupied() { return 1; }
+    yq() { return 0; }
+    AUTO_CONFIRM=true
+    INSTALL_SELF_SIGNED=true
+    (install_node latest)
     ;;
 edit-env-now)
     detect_os() { :; }
@@ -290,7 +319,11 @@ else
 fi
 
 setup_case env-lock-holds-off-core-update
+export DATA_DIR="$CASE_DIR/data"
+mkdir -p "$DATA_DIR/xray-core"
+printf 'xray v25.1.1\n' >"$DATA_DIR/xray-core/xray"
 printf 'services:\n  node:\n    volumes:\n      - /var/lib/interleave:/var/lib/pg-node\n' >"$CASE_DIR/docker-compose.yml"
+cp "$CASE_DIR/docker-compose.yml" "$CASE_DIR/compose.before"
 printf '# XRAY_EXECUTABLE_PATH = /usr/local/bin/xray\n' >>"$ENV_FILE"
 exec 7>>"$ENV_FILE.lock"
 flock 7
@@ -307,6 +340,16 @@ elif [ "$core_update_rc" -eq 0 ]; then
 else
     pass "env lock: core-update fails loudly instead of writing while the .env lock is held"
 fi
+if grep -qx 'xray v25.1.1' "$DATA_DIR/xray-core/xray" && cmp -s "$CASE_DIR/docker-compose.yml" "$CASE_DIR/compose.before"; then
+    pass "env lock: a core-update that could not get the lock left the installed core and the compose file as they were"
+else
+    fail "env lock: a core-update that failed on the lock had already replaced the core or the compose file, so the next restart runs what the panel was told failed"
+fi
+if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
+    fail "env lock: a failed core-update left its staged download behind"
+else
+    pass "env lock: a failed core-update removes its staged download"
+fi
 start_writer core-update-now
 wait "$WRITER_PID"
 unset NODE_ENV_LOCK_WAIT_SECONDS
@@ -315,6 +358,56 @@ if grep -qx 'XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray' "$ENV_FILE";
 else
     fail "env lock: core-update did not write XRAY_EXECUTABLE_PATH with the lock free"
 fi
+if grep -qx 'xray v99.0.0' "$DATA_DIR/xray-core/xray"; then
+    pass "env lock: core-update installs the new core when the lock is free"
+else
+    fail "env lock: core-update did not install the new core with the lock free"
+fi
+export DATA_DIR="$WORK_DIR/data"
+
+setup_case env-lock-holds-off-install
+export DATA_DIR="$CASE_DIR/data"
+mkdir -p "$DATA_DIR/certs"
+printf 'pinned-cert\n' >"$DATA_DIR/certs/ssl_cert.pem"
+cp "$ENV_FILE" "$CASE_DIR/env.before"
+exec 7>>"$ENV_FILE.lock"
+flock 7
+export NODE_ENV_LOCK_WAIT_SECONDS=1
+start_writer install-now
+wait "$WRITER_PID"
+install_rc=$?
+unset NODE_ENV_LOCK_WAIT_SECONDS
+flock -u 7
+exec 7>&-
+if [ "$install_rc" -ne 0 ] && grep -qx 'pinned-cert' "$DATA_DIR/certs/ssl_cert.pem" && cmp -s "$ENV_FILE" "$CASE_DIR/env.before"; then
+    pass "env lock: an install that could not get the lock changed neither the TLS certificate nor .env"
+else
+    fail "env lock: an install that failed on the lock had already replaced the TLS certificate or .env (exit $install_rc, cert: $(cat "$DATA_DIR/certs/ssl_cert.pem"))"
+fi
+if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
+    fail "env lock: a failed install left its staged certificate or downloads behind"
+else
+    pass "env lock: a failed install removes what it staged"
+fi
+start_writer install-now
+wait "$WRITER_PID"
+install_rc=$?
+if [ "$install_rc" -eq 0 ] && grep -qx 'regenerated-cert' "$DATA_DIR/certs/ssl_cert.pem" && grep -qx 'regenerated-key' "$DATA_DIR/certs/ssl_key.pem" && grep -qx 'SERVICE_PORT= 62050' "$ENV_FILE" && grep -q '^API_KEY= [0-9a-f-]\{36\}$' "$ENV_FILE"; then
+    pass "env lock: an install with the lock free installs the certificate and writes .env"
+else
+    fail "env lock: an install with the lock free did not install the certificate or write .env (exit $install_rc)"
+fi
+if [ "$(stat -c %a "$DATA_DIR/certs/ssl_key.pem" 2>/dev/null)" = "600" ] && [ "$(stat -c %a "$ENV_FILE" 2>/dev/null)" = "600" ]; then
+    pass "env lock: the installed private key and .env are owner-only"
+else
+    fail "env lock: the installed private key or .env is readable by others ($(stat -c %a "$DATA_DIR/certs/ssl_key.pem" "$ENV_FILE" 2>/dev/null | tr '\n' ' '))"
+fi
+if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
+    fail "env lock: a completed install left its staged files behind"
+else
+    pass "env lock: a completed install removes what it staged"
+fi
+export DATA_DIR="$WORK_DIR/data"
 
 setup_case edit-env-does-not-block-writers
 EDITOR_PROBE="$CASE_DIR/editor-probe"
