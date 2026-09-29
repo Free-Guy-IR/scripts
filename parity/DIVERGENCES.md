@@ -115,6 +115,9 @@ What e190d3d changes:
 - **First install whose disable fails:** the pull request's test looked for a retained snapshot file, which only
   the `.env` snapshot provided. A first install snapshots only the unit and the binary, and neither exists yet, so
   there is no file to retain. The test now checks the retention message, and that `.env` was never snapshotted.
+- **Work directory cleanup:** the pull request's transaction test calls the transaction functions in its own
+  shell, and they run `trap - EXIT`, so its cleanup trap never fired and each run left its `WORK_DIR` behind.
+  The test now re-runs itself in a child, and the parent removes the directory.
 - **Test file:** `tests/test_node_service_env_interleaving.sh`.
 
 ## Small fixes to upstream functions

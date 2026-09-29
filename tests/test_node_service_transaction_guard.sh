@@ -2,8 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+if [ -z "${TRANSACTION_GUARD_WORK_DIR:-}" ]; then
+    TRANSACTION_GUARD_WORK_DIR="$(mktemp -d)"
+    export TRANSACTION_GUARD_WORK_DIR
+    trap 'rm -rf "$TRANSACTION_GUARD_WORK_DIR"' EXIT
+    bash "${BASH_SOURCE[0]}" "$@"
+    exit
+fi
+WORK_DIR="$TRANSACTION_GUARD_WORK_DIR"
+unset TRANSACTION_GUARD_WORK_DIR
 
 export APP_TMP_DIR="$WORK_DIR/tmp"
 export APP_NAME="transaction-test"
