@@ -9,6 +9,21 @@ tags, and open pull requests. Each decision is pinned to that item's current SHA
 fails when upstream has a commit, branch, release tag or open pull request that is neither in the fork's history
 nor in the ledger at its current SHA.
 
+The check trusts nothing it did not see itself:
+
+- It compares every local `refs/remotes/upstream/*` and `refs/upstream-tags/*` ref with `git ls-remote`, so a
+  partial fetch (`git fetch upstream main`), a stale fetch or an unpruned ref fails and prints the fetch command.
+- Without `OPEN_PRS_FILE` it lists the open pull requests from the GitHub API itself, reads every page, and fails
+  when the API is unreachable or answers with anything but a list. The output says where the list came from.
+  `OPEN_PRS_FILE` exists for the tests; a parity claim must come from a run without it.
+
+To check parity from a local clone:
+
+```
+git fetch --prune --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*' '+refs/tags/*:refs/upstream-tags/*'
+bash tools/check-upstream-parity.sh
+```
+
 This file lists every upstream-owned file the fork changes, and why.
 
 ## Repository and image names

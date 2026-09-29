@@ -10,6 +10,10 @@ A check that stops running looks exactly like a check that passes. It therefore 
 
 ## Plan (not installed yet)
 
+Nothing described below is installed. The watchdog would run inside the owner's async-review daemon, so adding it
+is the owner's decision; until he makes it, the only guard is the daily workflow above, and a disabled schedule
+stays silent.
+
 The watchdog is a job in the async-review daemon (launchd `com.freeguy.async-review`, every 15 minutes, on the
 owner's Mac). Findings it writes to `~/.claude/pending-review-findings.md` are already injected into every session.
 

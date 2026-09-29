@@ -27,25 +27,10 @@ jobs:
           git remote add upstream https://github.com/PasarGuard/scripts.git
           git fetch --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*' '+refs/tags/*:refs/upstream-tags/*'
 
-      - name: List open upstream pull requests
+      - name: Check every upstream item is ported or decided
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          page=1
-          : > "$RUNNER_TEMP/open-prs.tsv"
-          while :; do
-              batch="$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/PasarGuard/scripts/pulls?state=open&per_page=100&page=$page")"
-              count="$(jq 'length' <<<"$batch")"
-              jq -r '.[] | [(.number | tostring), .head.sha] | @tsv' <<<"$batch" >> "$RUNNER_TEMP/open-prs.tsv"
-              [ "$count" -eq 100 ] || break
-              page=$((page + 1))
-          done
-          cat "$RUNNER_TEMP/open-prs.tsv"
-
-      - name: Check every upstream item is ported or decided
-        run: OPEN_PRS_FILE="$RUNNER_TEMP/open-prs.tsv" bash tools/check-upstream-parity.sh
+        run: bash tools/check-upstream-parity.sh
 
       - name: Test the parity check itself
         run: bash tests/test_upstream_parity_check.sh

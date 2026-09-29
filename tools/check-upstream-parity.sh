@@ -4,6 +4,8 @@ set -uo pipefail
 upstream_remote="${UPSTREAM_REMOTE:-upstream}"
 ledger="${PARITY_LEDGER:-parity/ledger.tsv}"
 open_prs_file="${OPEN_PRS_FILE:-}"
+upstream_github_repo="${UPSTREAM_GITHUB_REPO:-}"
+open_prs_source=""
 fork_ref="${FORK_REF:-HEAD}"
 problems=0
 
@@ -23,6 +25,38 @@ ledger_sha() {
     awk -F '\t' -v kind="$kind" -v name="$name" 'NR > 1 && $1 == kind && $2 == name { print $3; exit }' "$ledger"
 }
 
+github_repo_of_remote() {
+    local url
+    url="$(git remote get-url "$1" 2>/dev/null)" || return 1
+    case "$url" in
+    https://github.com/*) url="${url#https://github.com/}" ;;
+    ssh://*@github.com/*) url="${url#ssh://*@github.com/}" ;;
+    *@github.com:*) url="${url#*@github.com:}" ;;
+    *) return 1 ;;
+    esac
+    url="${url%.git}"
+    url="${url%/}"
+    [[ "$url" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+    printf '%s\n' "$url"
+}
+
+list_open_pull_requests() {
+    local repo="$1" page=1 batch count
+    local auth=()
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    fi
+    while :; do
+        batch="$(curl -fsSL --connect-timeout 15 --max-time 60 ${auth[@]+"${auth[@]}"} \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/pulls?state=open&per_page=100&page=$page")" || return 1
+        count="$(jq -e 'if type == "array" then length else error("not a list") end' <<<"$batch" 2>/dev/null)" || return 1
+        jq -r '.[] | [(.number | tostring), .head.sha] | @tsv' <<<"$batch" || return 1
+        [ "$count" -eq 100 ] || return 0
+        page=$((page + 1))
+    done
+}
+
 if [ ! -f "$ledger" ]; then
     report "ledger $ledger not found"
     exit 1
@@ -31,9 +65,28 @@ if ! git rev-parse --verify -q "refs/remotes/${upstream_remote}/main" >/dev/null
     report "refs/remotes/${upstream_remote}/main does not exist; fetch the upstream remote before checking parity"
     exit 1
 fi
-if [ -z "$open_prs_file" ] || [ ! -r "$open_prs_file" ]; then
-    report "OPEN_PRS_FILE must name a readable list of open upstream pull requests (it may be empty)"
-    exit 1
+if [ -n "$open_prs_file" ]; then
+    if [ ! -r "$open_prs_file" ]; then
+        report "OPEN_PRS_FILE $open_prs_file is not readable"
+        exit 1
+    fi
+    open_prs_source="read from OPEN_PRS_FILE $open_prs_file"
+else
+    if [ -z "$upstream_github_repo" ] && ! upstream_github_repo="$(github_repo_of_remote "$upstream_remote")"; then
+        report "cannot tell which GitHub repository $upstream_remote is, so its open pull requests cannot be listed; set UPSTREAM_GITHUB_REPO"
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        report "jq is required to list the open pull requests of $upstream_github_repo"
+        exit 1
+    fi
+    open_prs_file="$(mktemp)"
+    trap 'rm -f "$open_prs_file"' EXIT
+    if ! list_open_pull_requests "$upstream_github_repo" >"$open_prs_file"; then
+        report "could not list the open pull requests of $upstream_github_repo from the GitHub API"
+        exit 1
+    fi
+    open_prs_source="fetched from the GitHub API for $upstream_github_repo"
 fi
 
 if ! remote_refs="$(git ls-remote --refs --heads --tags "$upstream_remote")" || [ -z "$remote_refs" ]; then
@@ -139,6 +192,7 @@ while IFS=$'\t' read -r number pr_head; do
     fi
 done <"$open_prs_file"
 
+printf 'PARITY: %d open pull request(s) %s\n' "$(grep -c . "$open_prs_file")" "$open_prs_source"
 if [ "$problems" -ne 0 ]; then
     printf 'PARITY: %d item(s) need a decision in %s\n' "$problems" "$ledger"
     exit 1
