@@ -85,7 +85,12 @@ What e190d3d changes:
   `sync_env_ssl_paths`, geofiles, core-update and install. `tests/test_env_writes_hold_lock.sh` fails on any
   `.env` write in `pg-node.sh` outside the lock.
   - The analyser, `tests/env_lock_analyzer.py`, treats every line that names `.env` as a write unless it is a
-    known read. It models conditional acquires, and flags a `curl` without `--max-time` while the lock is held.
+    known read. A line names `.env` through `$ENV_FILE`, an alias of it, any variable or literal path ending in
+    `/.env`, or a bare `.env` word. It models conditional acquires, and flags a `curl` without `--max-time` while
+    the lock is held.
+  - A write piped into `xargs`, `sh` or `eval`, a call to a `lib/env.sh` writer, and any write or locked helper
+    sent to the background (a trailing `&`, or a block closed by `) &`) are flagged too, because a background
+    job can outlive the lock.
   - `tests/fixtures/env_lock_probes.txt` holds one unlocked write per form the reviews found. The analyser must
     flag each of them before it checks `pg-node.sh`.
   - `begin_node_service_transaction` refuses an empty path list and refuses `.env`. Changes to `.env` go

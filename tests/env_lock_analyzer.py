@@ -4,7 +4,9 @@ import sys
 
 ENV_REF = re.compile(
     r'\\?\$(?:\{ENV_FILE\}|ENV_FILE\b|\{NODE_SERVICE_ENV_WRITE_TARGET\}|NODE_SERVICE_ENV_WRITE_TARGET\b)'
-    r'|"?\\?\$\{?APP_DIR\}?"?/\.env\b'
+    r'|"?\\?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"?/\.env(?![\w.\-])'
+    r'|(?:(?<=[\s"\'=<>(])|^)(?:/[\w.\-]+)*/\.env(?![\w.\-])'
+    r'|(?:(?<=[\s"\'=<>(])|^)\.env(?![\w.\-])'
 )
 ASSIGNMENT = re.compile(r'^(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
 FUNCTION_START = re.compile(
@@ -15,7 +17,14 @@ HELPERS_NEEDING_LOCK = {
     "replace_node_env_file",
     "replace_node_service_api_port",
     "append_node_service_api_port",
+    "replace_or_append_env_var",
+    "set_or_uncomment_env_var",
+    "comment_out_env_var",
+    "delete_env_var",
 }
+EXECUTORS = {"xargs", "parallel", "sh", "bash", "dash", "zsh", "source", ".", "eval"}
+WRAPPERS = {"nohup", "command", "builtin", "sudo", "nice", "setsid", "stdbuf", "env", "time"}
+BACKGROUND_BLOCK_END = re.compile(r'^\s*(?:\)|\}|done|fi|esac)[^&]*(?<![&>|<])&\s*$')
 READ_COMMANDS = {
     "grep", "egrep", "fgrep", "cat", "head", "tail", "cmp", "diff", "cut", "sort", "uniq", "tr", "wc",
     "test", "[", "[[", "stat", "sha256sum", "md5sum", "ls", "readlink", "realpath", "dirname", "basename",
@@ -85,8 +94,13 @@ def owned_lines(lines, spans):
 
 
 def split_commands(text):
+    return [segment for segment, _ in split_commands_flagged(text)]
+
+
+def split_commands_flagged(text):
     segments = []
     current = []
+    list_start = 0
     quote = None
     depth = 0
     index = 0
@@ -127,29 +141,38 @@ def split_commands(text):
                     level -= 1
                 scan += 1
             inner = text[start:scan - 1]
-            segments.extend(split_commands(inner))
+            segments.extend(split_commands_flagged(inner))
             current.append("__SUBST__")
             index = scan
             depth -= 1
             continue
         if text.startswith("&&", index) or text.startswith("||", index):
-            segments.append("".join(current))
+            segments.append(("".join(current), False))
             current = []
             index += 2
+            continue
+        if char == "&" and (index == 0 or text[index - 1] not in "<>|&") and not text.startswith("&>", index):
+            segments.append(("".join(current), True))
+            segments[list_start:] = [(segment, True) for segment, _ in segments[list_start:]]
+            list_start = len(segments)
+            current = []
+            index += 1
             continue
         if char in (";", "|") and not text.startswith("|&", index):
             if char == "|" and index > 0 and text[index - 1] == ">":
                 current.append(char)
                 index += 1
                 continue
-            segments.append("".join(current))
+            segments.append(("".join(current), False))
+            if char == ";":
+                list_start = len(segments)
             current = []
             index += 1
             continue
         current.append(char)
         index += 1
-    segments.append("".join(current))
-    return [segment.strip() for segment in segments if segment.strip()]
+    segments.append(("".join(current), False))
+    return [(segment.strip(), background) for segment, background in segments if segment.strip()]
 
 
 def env_refs(segment, aliases):
@@ -176,6 +199,33 @@ def command_words(segment):
     while words and (words[0] in KEYWORDS or re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0])):
         words = words[1:]
     return words
+
+
+def effective_command(segment):
+    words = command_words(segment)
+    while words:
+        if words[0] == "timeout":
+            words = [word for word in words[1:] if not word.startswith("-")][1:]
+            continue
+        if words[0] in WRAPPERS:
+            words = words[1:]
+            while words and (words[0].startswith("-") or re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0])):
+                words = words[1:]
+            continue
+        break
+    return words[0] if words else ""
+
+
+def background_positions(body):
+    positions = set()
+    for position, (_, indent, text) in enumerate(body):
+        if not BACKGROUND_BLOCK_END.match(strip_comment(text)):
+            continue
+        opener = position - 1
+        while opener >= 0 and (not body[opener][2].strip() or body[opener][1] > indent):
+            opener -= 1
+        positions.update(range(max(opener, 0), position + 1))
+    return positions
 
 
 def classify_segment(segment, aliases):
@@ -303,6 +353,7 @@ def logical_lines(body):
 
 def analyze_body(name, body, label):
     body = logical_lines(body)
+    backgrounded = background_positions(body)
     problems = []
     writes = 0
     aliases = set()
@@ -337,16 +388,27 @@ def analyze_body(name, body, label):
             held.clear()
         if name in HELPERS_NEEDING_LOCK:
             continue
-        for segment in split_commands(text):
+        flagged = split_commands_flagged(text)
+        names_env = any(env_refs(segment, aliases) for segment, _ in flagged)
+        executes = any(effective_command(segment) in EXECUTORS for segment, _ in flagged)
+        for segment, background in flagged:
+            background = background or position in backgrounded
             verdict = classify_segment(segment, aliases)
+            if verdict != "write" and names_env and executes and effective_command(segment) in EXECUTORS:
+                verdict = "write"
+            command = effective_command(segment)
             if verdict == "write":
                 writes += 1
                 if not is_held:
                     problems.append(f"{label}:{number}: {name} writes .env outside the .env lock: {raw.strip()}")
-            words = command_words(segment)
-            if words and words[0] in HELPERS_NEEDING_LOCK and not is_held:
-                problems.append(f"{label}:{number}: {name} calls {words[0]}, which writes .env, outside the .env lock")
-            if words and words[0] == "curl" and is_held and "--max-time" not in segment:
+                elif background:
+                    problems.append(f"{label}:{number}: {name} writes .env in a background job that can outlive the .env lock: {raw.strip()}")
+            if command in HELPERS_NEEDING_LOCK:
+                if not is_held:
+                    problems.append(f"{label}:{number}: {name} calls {command}, which writes .env, outside the .env lock")
+                elif background:
+                    problems.append(f"{label}:{number}: {name} runs {command}, which writes .env, in a background job that can outlive the .env lock")
+            if command == "curl" and is_held and "--max-time" not in segment:
                 problems.append(f"{label}:{number}: {name} holds the .env lock across a curl without --max-time")
     return writes, problems
 
