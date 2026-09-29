@@ -163,3 +163,59 @@ ok_reads() {
     colorized_echo red "Environment file not found at $ENV_FILE"
     printf '%s\n' "${ENV_FILE}.lock"
 }
+### flag mut_other_dir_var
+mut_other_dir_var() {
+    local d="$APP_DIR"
+    sed -i "s/a/b/" "$d/.env"
+}
+### flag mut_literal_path
+mut_literal_path() {
+    sed -i "s/a/b/" /opt/pg-node/.env
+}
+### flag mut_relative_path
+mut_relative_path() {
+    cd "$APP_DIR" || return 1
+    sed -i "s/a/b/" .env
+}
+### flag mut_find_delete
+mut_find_delete() {
+    find "$APP_DIR" -maxdepth 1 -name '.env' -delete
+}
+### flag mut_xargs
+mut_xargs() {
+    printf '%s\0' "$ENV_FILE" | xargs -0 sed -i "s/a/b/"
+}
+### flag mut_background
+mut_background() {
+    acquire_node_env_lock || return 1
+    nohup sed -i "s/a/b/" "$ENV_FILE" >/dev/null 2>&1 &
+    release_node_env_lock
+}
+### flag mut_background_helper
+mut_background_helper() {
+    acquire_node_env_lock || return 1
+    replace_node_env_file "$target" "$copy" &
+    release_node_env_lock
+}
+### flag mut_env_lib_helper
+mut_env_lib_helper() {
+    replace_or_append_env_var "X" "1"
+}
+### flag mut_background_block
+mut_background_block() {
+    acquire_node_env_lock || return 1
+    (
+        sed -i "s/a/b/" "$ENV_FILE"
+    ) &
+    release_node_env_lock
+}
+### ok ok_names_without_writing
+ok_names_without_writing() {
+    colorized_echo blue "Fetching .env and compose file"
+    curl -fsSL --max-time 60 "$FILES_URL_PREFIX/.env.example" -o "$stage/env.example"
+    find "$APP_DIR" -maxdepth 1 -name '.env.example' -print
+    some_command >"$log" 2>&1
+    wait_for_something &
+    grep -q '^A=' "$APP_DIR/.env" 2>/dev/null
+    printf '%s\n' "$ENV_FILE" | grep -q .
+}
