@@ -31,7 +31,7 @@ LEDGER="$WORK_DIR/ledger.tsv"
 OPEN_PRS="$WORK_DIR/open-prs.txt"
 
 run_check() {
-    (cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+    (cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 }
 
 expect() {
@@ -122,14 +122,14 @@ PARTIAL="$WORK_DIR/partial"
 git clone -q "$FORK" "$PARTIAL"
 git -C "$PARTIAL" remote add upstream "$UPSTREAM"
 git -C "$PARTIAL" fetch -q upstream main
-(cd "$PARTIAL" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+(cd "$PARTIAL" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "a clone that fetched only upstream main fails instead of passing"; else fail "a clone that fetched only upstream main passed although it never saw the other branches and tags"; fi
 if grep -q "refs/heads/side" "$WORK_DIR/out" && grep -q "refs/tags/v1.0.1" "$WORK_DIR/out"; then pass "the partial-fetch failure names the missing branch and tag"; else fail "the partial-fetch failure does not name the missing branch and tag"; fi
 
-(cd "$FORK" && UPSTREAM_REMOTE=nosuchremote PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+(cd "$FORK" && UPSTREAM_REMOTE=nosuchremote PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "a wrong upstream remote name fails instead of passing with nothing to compare"; else fail "a wrong upstream remote name passed silently"; fi
 
-(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "a run that cannot tell which GitHub repository to ask for open pull requests fails instead of skipping that check"; else fail "a run with no way to list open pull requests passed silently"; fi
 
 STUB_BIN="$WORK_DIR/stub-bin"
@@ -141,6 +141,7 @@ case "$STUB_MODE" in
 down) exit 22 ;;
 error-object) printf '{"message":"API rate limit exceeded"}\n' ;;
 one-pr) printf '[{"number":7,"head":{"sha":"1111111111111111111111111111111111111111"}}]\n' ;;
+empty) printf '[]\n' ;;
 two-pages)
     case "$*" in
     *"page=2"*) printf '[{"number":201,"head":{"sha":"2222222222222222222222222222222222222222"}}]\n' ;;
@@ -161,7 +162,7 @@ export STUB_LOG="$WORK_DIR/stub.log"
 
 run_api_check() {
     : >"$STUB_LOG"
-    (cd "$FORK" && PATH="$STUB_BIN:$PATH" STUB_MODE="$1" UPSTREAM_REMOTE=upstream UPSTREAM_GITHUB_REPO=Example/upstream PARITY_LEDGER="$LEDGER" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+    (cd "$FORK" && PATH="$STUB_BIN:$PATH" STUB_MODE="$1" UPSTREAM_REMOTE=upstream UPSTREAM_GITHUB_REPO=Example/upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 }
 
 run_api_check one-pr
@@ -178,12 +179,44 @@ run_api_check two-pages
 if [ $? -ne 0 ] && grep -q '#201' "$WORK_DIR/out"; then pass "the check reads every page of open pull requests"; else fail "the check stopped after the first page of open pull requests"; fi
 sed -i.bak '/^pr\t7\t/d' "$LEDGER" && rm -f "$LEDGER.bak"
 
-(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$WORK_DIR/no-such-file" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+(cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$WORK_DIR/no-such-file" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "an unreadable open pull request list fails the check"; else fail "an unreadable open pull request list passed silently"; fi
 
 UNFETCHED="$WORK_DIR/unfetched"
 git clone -q "$FORK" "$UNFETCHED"
-(cd "$UNFETCHED" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+(cd "$UNFETCHED" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
 if [ $? -ne 0 ]; then pass "a clone that never fetched upstream fails instead of passing"; else fail "a clone that never fetched upstream passed silently"; fi
+
+run_strict() {
+    (cd "${STRICT_DIR:-$FORK}" && env UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" "$@" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
+}
+
+: >"$OPEN_PRS"
+run_strict PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE=/dev/null
+if [ $? -ne 0 ]; then pass "OPEN_PRS_FILE=/dev/null fails even with the empty-list waiver"; else fail "OPEN_PRS_FILE=/dev/null passed as a list of no pull requests"; fi
+run_strict PARITY_EXPECTED_UPSTREAM="$UPSTREAM" OPEN_PRS_FILE="$OPEN_PRS"
+if [ $? -ne 0 ] && grep -q 'PARITY_ALLOW_NO_OPEN_PRS' "$WORK_DIR/out"; then pass "an empty open pull request list fails unless it is waived, and the failure names the waiver"; else fail "an empty open pull request list passed without a waiver"; fi
+run_strict PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS"
+if [ $? -eq 0 ] && grep -q 'waived by PARITY_ALLOW_NO_OPEN_PRS' "$WORK_DIR/out"; then pass "a waived empty list passes and says it was waived"; else fail "a waived empty list did not pass, or hid the waiver"; fi
+printf 'seven\tnot-a-sha\n' >"$OPEN_PRS"
+run_strict PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS"
+if [ $? -ne 0 ] && grep -q 'malformed' "$WORK_DIR/out"; then pass "a malformed open pull request list fails and says so"; else fail "a malformed open pull request list was not reported as malformed"; fi
+: >"$OPEN_PRS"
+: >"$STUB_LOG"
+run_strict PATH="$STUB_BIN:$PATH" STUB_MODE=empty PARITY_EXPECTED_UPSTREAM="$UPSTREAM" UPSTREAM_GITHUB_REPO=Example/upstream
+if [ $? -ne 0 ]; then pass "an empty list from the GitHub API fails unless it is waived"; else fail "an empty list from the GitHub API passed without a waiver"; fi
+
+run_strict PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS"
+if [ $? -ne 0 ] && grep -q 'github.com/PasarGuard/scripts' "$WORK_DIR/out"; then pass "an upstream remote that is not github.com/PasarGuard/scripts fails by default"; else fail "an upstream remote that is not github.com/PasarGuard/scripts passed"; fi
+MIRROR="$WORK_DIR/mirror"
+git clone -q "$FORK" "$MIRROR"
+git -C "$MIRROR" remote add upstream https://github.com/Free-Guy-IR/scripts.git
+STRICT_DIR="$MIRROR" run_strict PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS"
+if [ $? -ne 0 ] && grep -q 'github.com/Free-Guy-IR/scripts' "$WORK_DIR/out"; then pass "an upstream remote pointing at the fork itself fails and names it"; else fail "an upstream remote pointing at the fork itself passed"; fi
+git -C "$MIRROR" remote set-url upstream "$(printf '%s@%s' git github.com):pasarguard/Scripts.git"
+STRICT_DIR="$MIRROR" run_strict PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS"
+if ! grep -q 'is not github.com/PasarGuard/scripts' "$WORK_DIR/out" && grep -q 'refs/remotes/upstream/main does not exist' "$WORK_DIR/out"; then pass "an scp-style remote for PasarGuard/scripts in another letter case is accepted as the upstream"; else fail "the real upstream in another URL form was rejected"; fi
+STRICT_DIR="$MIRROR" run_strict UPSTREAM_GITHUB_REPO=Someone/else
+if [ $? -ne 0 ] && grep -q 'UPSTREAM_GITHUB_REPO' "$WORK_DIR/out"; then pass "UPSTREAM_GITHUB_REPO cannot point the pull request check at another repository"; else fail "UPSTREAM_GITHUB_REPO pointed the pull request check at another repository"; fi
 
 [ "$FAILURES" -eq 0 ]
