@@ -39,7 +39,7 @@ for suite in "${SUITES[@]}"; do
     fi
 
     printf "▶ Running %s...\n" "$suite"
-    if bash "$suite_path"; then
+    if bash "$TESTS_DIR/run_isolated.sh" "$suite_path"; then
         printf "✔ %s passed.\n\n" "$suite"
         PASSED=$((PASSED + 1))
     else

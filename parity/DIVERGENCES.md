@@ -159,3 +159,10 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_env_writes_hold_lock.sh`
 - `test_upstream_parity_check.sh`
 - `test_fork_workflow_hardening.sh`
+- `test_run_isolated.sh`
+
+Every workflow test step, and every suite in `tests/run_all.sh`, runs through `tests/run_isolated.sh`. The harness
+gives the test a private `TMPDIR`, fails it when it leaves anything there, and removes the directory either way.
+It exists because `pg-node.sh`'s transaction and staging code runs `trap - EXIT` in the caller's shell, which
+silently dropped the cleanup trap of tests that source it; their `WORK_DIR`s piled up in `/tmp` on the test host.
+In `tests/run_all.sh` the fork adds the two PR #25 suites and calls each suite through the harness.

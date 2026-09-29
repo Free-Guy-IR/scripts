@@ -45,34 +45,37 @@ jobs:
           sudo apt-get install -y rsync zip unzip
 
       - name: Backup archives the dump it just took
-        run: bash tests/test_fresh_dump_in_archive.sh
+        run: bash tests/run_isolated.sh tests/test_fresh_dump_in_archive.sh
 
       - name: A failed restore restarts the panel and keeps its log
-        run: bash tests/test_restore_failure_restarts_panel.sh
+        run: bash tests/run_isolated.sh tests/test_restore_failure_restarts_panel.sh
 
       - name: Scripts report their commit honestly and fetch the fork
-        run: bash tests/test_fork_script_repo.sh
+        run: bash tests/run_isolated.sh tests/test_fork_script_repo.sh
 
       - name: node-serviced is installed only when it matches the release checksum
-        run: bash tests/test_node_serviced_checksum.sh
+        run: bash tests/run_isolated.sh tests/test_node_serviced_checksum.sh
 
       - name: Services running the fork's panel image are panel services
-        run: bash tests/test_fork_panel_image_detection.sh
+        run: bash tests/run_isolated.sh tests/test_fork_panel_image_detection.sh
 
       - name: The node-serviced unit is written with mode 644
-        run: bash tests/test_node_service_unit_mode.sh
+        run: bash tests/run_isolated.sh tests/test_node_service_unit_mode.sh
 
       - name: No node-serviced update lock on nodes without node-serviced
-        run: bash tests/test_node_service_lock_only_when_installed.sh
+        run: bash tests/run_isolated.sh tests/test_node_service_lock_only_when_installed.sh
 
       - name: Standalone bundles report the commit they were built from
-        run: bash tests/test_standalone_commit_bake.sh
+        run: bash tests/run_isolated.sh tests/test_standalone_commit_bake.sh
 
       - name: node-serviced rollbacks keep concurrent .env edits
-        run: bash tests/test_node_service_env_interleaving.sh
+        run: bash tests/run_isolated.sh tests/test_node_service_env_interleaving.sh
 
       - name: Every .env write in pg-node.sh holds the .env lock
-        run: bash tests/test_env_writes_hold_lock.sh
+        run: bash tests/run_isolated.sh tests/test_env_writes_hold_lock.sh
 
       - name: Fork workflows pin their actions and drop the job token
-        run: bash tests/test_fork_workflow_hardening.sh
+        run: bash tests/run_isolated.sh tests/test_fork_workflow_hardening.sh
+
+      - name: The test harness fails a test that leaves temporary files
+        run: bash tests/run_isolated.sh tests/test_run_isolated.sh
