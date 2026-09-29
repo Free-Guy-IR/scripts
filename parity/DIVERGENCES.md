@@ -81,23 +81,37 @@ What e190d3d changes:
 - **How service-install rolls back `API_PORT`:** the write keeps before and after copies, taken under the `.env`
   lock at write time. The rollback restores the before copy only while `.env` still equals what the install
   wrote.
-- **One `.env` lock:** every pg-node `.env` writer takes a single flock on `$ENV_FILE.lock`: `API_PORT`,
-  `sync_env_ssl_paths`, geofiles, core-update and install. `tests/test_env_writes_hold_lock.sh` fails on any
-  `.env` write in `pg-node.sh` outside the lock.
-  - The analyser, `tests/env_lock_analyzer.py`, treats every line that names `.env` as a write unless it is a
-    known read. A line names `.env` through `$ENV_FILE`, an alias of it, any variable or literal path ending in
-    `/.env`, or a bare `.env` word. It models conditional acquires, and flags a `curl` without `--max-time` while
-    the lock is held.
-  - A write piped into `xargs`, `sh` or `eval`, a call to a `lib/env.sh` writer, and any write or locked helper
-    sent to the background (a trailing `&`, or a block closed by `) &`) are flagged too, because a background
-    job can outlive the lock.
-  - `tests/fixtures/env_lock_probes.txt` holds one unlocked write per form the reviews found. The analyser must
-    flag each of them before it checks `pg-node.sh`.
+- **One `.env` lock, one writer:** every pg-node `.env` writer takes a single flock on `$ENV_FILE.lock`:
+  `API_PORT`, `sync_env_ssl_paths`, geofiles, core-update, edit-env and install, including the standalone
+  install in `iran-sanction/pg-node-standalone.sh`.
+  - Every change to `.env` goes through `node_env_write` (actions `sed`, `append_unless`, `copy_from`,
+    `harden`, `replace`, `move_in`). It refuses at runtime unless `node_env_lock_is_held`: the lock flag is set,
+    descriptor 8 is open, and on Linux it points at the lock file. `replace` also refuses any target other than
+    `.env` or the file it resolves to.
+  - `tests/test_node_env_write_requires_lock.sh` checks the refusals: without the lock, with a forged flag,
+    with a descriptor on another file, and after release. It also checks that every action works under the lock.
+  - `tests/test_env_writes_hold_lock.sh` runs the static analyser, `tests/env_lock_analyzer.py`, over
+    `pg-node.sh`, the four libraries it sources, the standalone wrapper and `iran-sanction/mirror.sh`.
+    - Any word that can name `.env` counts as a write unless it is a known read. That covers any `$ENV_FILE`
+      expansion, `${!var}`, any path or bare word `.env`, `.$var`, and a glob or brace pattern that matches
+      `.env`. It also covers a copy, move or extract into `APP_DIR`, and a here-document run by a shell.
+    - Every such write outside `node_env_write` fails, whether or not the lock is held.
+    - `node_env_write` calls must hold the lock, name a known action, and not run in the background.
+    - `eval`, and calls to panel library functions that write `.env`, are refused.
+  - The analyser is a guard against every form the reviews found, not a proof. A file name assembled at runtime
+    from values it cannot see is outside its model. The runtime check in `node_env_write` and the rule that
+    nothing else may write `.env` are what hold there.
+  - `tests/fixtures/env_lock_probes.txt` holds one unsafe change per form the reviews found, and safe forms that
+    must pass. The analyser must judge each of them before it checks the scripts.
   - `begin_node_service_transaction` refuses an empty path list and refuses `.env`. Changes to `.env` go
     through the lock, never through a snapshot and restore.
 - **Stage, then apply under the lock:** core-update and install stage their downloads and certificate first,
   and change the live files only after taking the lock. This covers the Xray-core files, the certificate and
   key, `.env` and the compose file.
+  - The standalone `install_node` does the same with `stage_node_install_certificate`. Upstream's version
+    wrote the certificate, `.env` and compose file without the lock. The shared staging function also makes a
+    pasted private key owner-only, and honours `INSTALL_SELF_SIGNED`, `INSTALL_CERT_PATH` and
+    `INSTALL_KEY_PATH` there too.
   - A lock timeout, a failed download or a rejected prompt therefore changes nothing, and the staging directory
     is removed on exit.
   - No network call and no prompt runs while the lock is held.
@@ -160,6 +174,7 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_standalone_commit_bake.sh`
 - `test_node_service_env_interleaving.sh`
 - `test_env_writes_hold_lock.sh`
+- `test_node_env_write_requires_lock.sh`
 - `test_upstream_parity_check.sh`
 - `test_fork_workflow_hardening.sh`
 - `test_run_isolated.sh`

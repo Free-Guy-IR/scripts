@@ -262,7 +262,11 @@ def effective_words(segment):
     words = command_words(segment)
     while words:
         if words[0] == "timeout":
-            words = [word for word in words[1:] if not word.startswith("-")][1:]
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                takes_value = words[0] in ("-s", "--signal", "-k", "--kill-after")
+                words = words[2:] if takes_value else words[1:]
+            words = words[1:]
             continue
         if words[0] in WRAPPERS:
             words = words[1:]

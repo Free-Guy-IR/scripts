@@ -430,6 +430,58 @@ replace_node_env_file() {
     fi
 }
 
+node_env_lock_is_held() {
+    local descriptor_path
+
+    [ "$NODE_ENV_LOCK_HELD" = true ] || return 1
+    { : >&8; } 2>/dev/null || return 1
+    descriptor_path="/proc/${BASHPID:-$$}/fd/8"
+    if [ -e "$descriptor_path" ]; then
+        [ "$(readlink -f "$descriptor_path")" = "$(readlink -f "$(node_env_lock_path)")" ] || return 1
+    fi
+}
+
+node_env_write() {
+    local action="${1:-}"
+    local target
+
+    if ! node_env_lock_is_held; then
+        colorized_echo red "Refusing to change $ENV_FILE ($action) without holding its lock $(node_env_lock_path)."
+        return 1
+    fi
+    shift
+    case "$action:$#" in
+    sed:1)
+        sed -i "$1" "$ENV_FILE"
+        ;;
+    append_unless:2)
+        grep -q -- "$1" "$ENV_FILE" || printf '%s\n' "$2" >>"$ENV_FILE"
+        ;;
+    copy_from:1)
+        cat "$1" >"$ENV_FILE"
+        ;;
+    harden:0)
+        harden_secret_file "$ENV_FILE"
+        ;;
+    replace:2)
+        target="$2"
+        if [ "$target" != "$ENV_FILE" ] && [ "$target" != "$(node_env_write_target)" ] &&
+            { [ -z "$NODE_SERVICE_ENV_WRITE_TARGET" ] || [ "$target" != "$NODE_SERVICE_ENV_WRITE_TARGET" ]; }; then
+            colorized_echo red "Refusing to replace $target: it is not $ENV_FILE."
+            return 1
+        fi
+        replace_node_env_file "$target" "$1"
+        ;;
+    move_in:1)
+        mv -f "$1" "$(node_env_write_target)"
+        ;;
+    *)
+        colorized_echo red "Unknown change to $ENV_FILE: $action with $# argument(s)."
+        return 1
+        ;;
+    esac
+}
+
 discard_node_service_env_write() {
     [ -z "$NODE_SERVICE_ENV_BEFORE_WRITE" ] || rm -f "$NODE_SERVICE_ENV_BEFORE_WRITE"
     [ -z "$NODE_SERVICE_ENV_AFTER_WRITE" ] || rm -f "$NODE_SERVICE_ENV_AFTER_WRITE"
@@ -445,7 +497,7 @@ revert_node_service_env_write() {
     if cmp -s "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_BEFORE_WRITE"; then
         :
     elif cmp -s "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_AFTER_WRITE"; then
-        if ! replace_node_env_file "$NODE_SERVICE_ENV_WRITE_TARGET" "$NODE_SERVICE_ENV_BEFORE_WRITE"; then
+        if ! node_env_write replace "$NODE_SERVICE_ENV_BEFORE_WRITE" "$NODE_SERVICE_ENV_WRITE_TARGET"; then
             release_node_env_lock
             return 1
         fi
@@ -2066,18 +2118,18 @@ install_node() {
     colorized_echo green "  ✓ Certificate installed: $SSL_CERT_FILE"
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the node
     # API_KEY written below is never world-readable.
-    harden_secret_file "$APP_DIR/.env"
-    cat "$install_stage/env.example" >"$APP_DIR/.env" || die "Could not write $APP_DIR/.env"
-    colorized_echo green "  ✓ File saved: $APP_DIR/.env"
+    node_env_write harden || die "Could not restrict $ENV_FILE to its owner"
+    node_env_write copy_from "$install_stage/env.example" || die "Could not write $ENV_FILE"
+    colorized_echo green "  ✓ File saved: $ENV_FILE"
     cat "$install_stage/node.yml" >"$APP_DIR/docker-compose.yml" || die "Could not write $APP_DIR/docker-compose.yml"
     colorized_echo green "  ✓ File saved: $APP_DIR/docker-compose.yml"
     # Modifying .env file
-    sed -i "s/^SERVICE_PORT *= *.*/SERVICE_PORT= ${SERVICE_PORT}/" "$APP_DIR/.env"
-    sed -i "s/^API_KEY *= *.*/API_KEY= ${API_KEY}/" "$APP_DIR/.env"
+    node_env_write sed "s/^SERVICE_PORT *= *.*/SERVICE_PORT= ${SERVICE_PORT}/"
+    node_env_write sed "s/^API_KEY *= *.*/API_KEY= ${API_KEY}/"
     if [ "$USE_REST" -eq 1 ]; then
-        sed -i 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "rest"/' "$APP_DIR/.env"
+        node_env_write sed 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "rest"/'
     else
-        sed -i 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "grpc"/' "$APP_DIR/.env"
+        node_env_write sed 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "grpc"/'
     fi
     colorized_echo green ".env file modified successfully"
     # Modifying compose file
@@ -2115,8 +2167,8 @@ install_node() {
     # Keep SSL paths in .env aligned with the mapped volume (important for node-serviced on host)
     ssl_cert_env="${container_path}/certs/ssl_cert.pem"
     ssl_key_env="${container_path}/certs/ssl_key.pem"
-    sed -i "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|" "$APP_DIR/.env"
-    sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
+    node_env_write sed "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|"
+    node_env_write sed "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|"
     release_node_env_lock
     rm -rf "$install_stage"
     trap - EXIT
@@ -2398,13 +2450,13 @@ apply_node_env_ssl_paths() {
         mark_node_service_transaction_mutation_started || return 1
     fi
     if [[ -z "$current_cert" || "$current_cert" =~ /var/lib/pg-node/ ]]; then
-        sed -i "s|^[[:space:]]*SSL_CERT_FILE[[:space:]]*=.*|SSL_CERT_FILE= ${desired_cert}|" "$ENV_FILE"
-        grep -q '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" || echo "SSL_CERT_FILE= ${desired_cert}" >>"$ENV_FILE"
+        node_env_write sed "s|^[[:space:]]*SSL_CERT_FILE[[:space:]]*=.*|SSL_CERT_FILE= ${desired_cert}|" || return 1
+        node_env_write append_unless '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "SSL_CERT_FILE= ${desired_cert}" || return 1
         updated=true
     fi
     if [[ -z "$current_key" || "$current_key" =~ /var/lib/pg-node/ ]]; then
-        sed -i "s|^[[:space:]]*SSL_KEY_FILE[[:space:]]*=.*|SSL_KEY_FILE= ${desired_key}|" "$ENV_FILE"
-        grep -q '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "$ENV_FILE" || echo "SSL_KEY_FILE= ${desired_key}" >>"$ENV_FILE"
+        node_env_write sed "s|^[[:space:]]*SSL_KEY_FILE[[:space:]]*=.*|SSL_KEY_FILE= ${desired_key}|" || return 1
+        node_env_write append_unless '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "SSL_KEY_FILE= ${desired_key}" || return 1
         updated=true
     fi
     if [ "$updated" = true ]; then
@@ -2811,8 +2863,9 @@ can_reuse_node_service_api_port() {
 replace_node_service_api_port() {
     local api_port="$1"
     local api_port_comment="$2"
-    local env_file="${3:-$ENV_FILE}"
+    local env_file="$3"
 
+    [ -n "$env_file" ] || return 1
     sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$env_file" || return 1
     if ! grep -q '^# *API_PORT' "$env_file"; then
         sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$env_file" || return 1
@@ -2822,8 +2875,9 @@ replace_node_service_api_port() {
 append_node_service_api_port() {
     local api_port="$1"
     local api_port_comment="$2"
-    local env_file="${3:-$ENV_FILE}"
+    local env_file="$3"
 
+    [ -n "$env_file" ] || return 1
     {
         printf '\n'
         printf '%s\n' "$api_port_comment"
@@ -2877,7 +2931,7 @@ persist_node_service_api_port() {
     NODE_SERVICE_ENV_BEFORE_WRITE="$before"
     NODE_SERVICE_ENV_AFTER_WRITE="$after"
     NODE_SERVICE_ENV_WRITE_ACTIVE=true
-    if ! mv -f "$staged" "$target"; then
+    if ! node_env_write move_in "$staged"; then
         rm -f "$staged"
         release_node_env_lock
         return 1
@@ -3453,13 +3507,13 @@ update_core_command() {
         # Update volumes to use DATA_DIR (which is based on APP_NAME)
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
         # Set XRAY_EXECUTABLE_PATH to the container path, not host path
-        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray|" "$APP_DIR/.env"
-        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray" >>"$APP_DIR/.env"
+        node_env_write sed "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray|"
+        node_env_write append_unless '^XRAY_EXECUTABLE_PATH=' "XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray"
     else
         # Fallback to APP_NAME-based path if no volume mapping is detected
         local fallback_path="${DATA_DIR}/xray-core/xray"
-        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${fallback_path}|" "$APP_DIR/.env"
-        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${fallback_path}" >>"$APP_DIR/.env"
+        node_env_write sed "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${fallback_path}|"
+        node_env_write append_unless '^XRAY_EXECUTABLE_PATH=' "XRAY_EXECUTABLE_PATH= ${fallback_path}"
     fi
     release_node_env_lock
     rm -rf "$core_stage"
@@ -3522,7 +3576,7 @@ edit_env_command() {
             colorized_echo red "$ENV_FILE changed while you were editing it, so your edits were not saved over that change. They are kept in $working; merge them by hand."
             exit 1
         fi
-        if ! replace_node_env_file "$target" "$working"; then
+        if ! node_env_write replace "$working" "$target"; then
             release_node_env_lock
             rm -f "$original"
             colorized_echo red "Failed to save $ENV_FILE. Your edits are kept in $working."
@@ -3785,8 +3839,8 @@ geofiles_command() {
             colorized_echo red "Geofiles were downloaded, but XRAY_ASSETS_PATH could not be written to $ENV_FILE."
             exit 1
         fi
-        sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $xray_assets_path|" "$ENV_FILE"
-        grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $xray_assets_path" >> "$ENV_FILE"
+        node_env_write sed "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $xray_assets_path|"
+        node_env_write append_unless '^XRAY_ASSETS_PATH =' "XRAY_ASSETS_PATH = $xray_assets_path"
         release_node_env_lock
         colorized_echo blue "XRAY_ASSETS_PATH updated in $ENV_FILE"
         colorized_echo blue "Restarting node services..."
