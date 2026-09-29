@@ -36,6 +36,38 @@ if [ -z "$open_prs_file" ] || [ ! -r "$open_prs_file" ]; then
     exit 1
 fi
 
+if ! remote_refs="$(git ls-remote --refs --heads --tags "$upstream_remote")" || [ -z "$remote_refs" ]; then
+    report "git ls-remote could not list the branches and tags of $upstream_remote, so the local copy cannot be proven current"
+    exit 1
+fi
+stale_refs=0
+upstream_ref_names=""
+while IFS=$'\t' read -r remote_sha remote_ref; do
+    case "$remote_ref" in
+    refs/heads/*) local_ref="refs/remotes/${upstream_remote}/${remote_ref#refs/heads/}" ;;
+    refs/tags/*) local_ref="refs/upstream-tags/${remote_ref#refs/tags/}" ;;
+    *) continue ;;
+    esac
+    upstream_ref_names="${upstream_ref_names}${local_ref}"$'\n'
+    local_sha="$(git rev-parse -q --verify "$local_ref" 2>/dev/null || true)"
+    if [ "$local_sha" != "$remote_sha" ]; then
+        report "$remote_ref is $remote_sha upstream but $local_ref is ${local_sha:-missing} here"
+        stale_refs=$((stale_refs + 1))
+    fi
+done <<<"$remote_refs"
+while IFS= read -r local_ref; do
+    [ "$local_ref" = "refs/remotes/${upstream_remote}/HEAD" ] && continue
+    if ! grep -Fxq -- "$local_ref" <<<"$upstream_ref_names"; then
+        report "$local_ref no longer exists upstream"
+        stale_refs=$((stale_refs + 1))
+    fi
+done < <(git for-each-ref --format='%(refname)' "refs/remotes/${upstream_remote}/" 'refs/upstream-tags/')
+if [ "$stale_refs" -ne 0 ]; then
+    printf 'PARITY: the local copy of %s is partial or stale; refresh it with\n' "$upstream_remote"
+    printf "    git fetch --prune --no-tags %s '+refs/heads/*:refs/remotes/%s/*' '+refs/tags/*:refs/upstream-tags/*'\n" "$upstream_remote" "$upstream_remote"
+    exit 1
+fi
+
 while IFS=$'\t' read -r kind name sha decision detail; do
     case "$kind" in
     kind | "") continue ;;
