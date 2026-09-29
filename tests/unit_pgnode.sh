@@ -748,6 +748,8 @@ OCCUPIED_PORTS=$(printf "80\n443\n62051\n")
 assert_true  "is_port_occupied: 80 is busy"    is_port_occupied 80
 assert_true  "is_port_occupied: 62051 is busy" is_port_occupied 62051
 assert_false "is_port_occupied: 9000 is free"  is_port_occupied 9000
+OCCUPIED_PORTS=$(printf '80\n'; seq 10000 40000)
+assert_true  "is_port_occupied: a port early in a list longer than a pipe buffer is found under pipefail" is_port_occupied 80
 
 # -----------------------------------------------------------------------
 # is_node_installed  (APP_DIR is a temp dir we created)
