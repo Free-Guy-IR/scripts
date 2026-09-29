@@ -150,7 +150,7 @@ What e190d3d changes:
 
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 
-**Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 2cfe87b.
+**Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 5f61243.
 
 **What it does:** PostgreSQL and TimescaleDB installs connect through PgBouncer in transaction mode, which breaks the
 panel's asyncpg prepared statements on PgBouncer before 1.24. The port writes the panel URL with
