@@ -1579,7 +1579,7 @@ get_occupied_ports() {
 }
 # Function to check if a port is occupied
 is_port_occupied() {
-    if echo "$OCCUPIED_PORTS" | grep -q -w "$1"; then
+    if grep -q -w -- "$1" <<<"$OCCUPIED_PORTS"; then
         return 0
     else
         return 1
