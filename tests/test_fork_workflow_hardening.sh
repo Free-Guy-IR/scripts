@@ -35,4 +35,19 @@ for workflow in "${FORK_WORKFLOWS[@]}"; do
     fi
 done
 
+unwired=0
+while IFS= read -r test_path; do
+    test_name="${test_path#"$SCRIPTS_ROOT"/}"
+    if grep -qF -- "$test_name" "$SCRIPTS_ROOT"/.github/workflows/*.yml ||
+        grep -qF -- "\"$(basename "$test_path")\"" "$SCRIPTS_ROOT/tests/run_all.sh"; then
+        continue
+    fi
+    echo "FAIL: $test_name is not run by any workflow or by tests/run_all.sh"
+    unwired=$((unwired + 1))
+done < <(find "$SCRIPTS_ROOT/tests" -name '*.sh' ! -name run_all.sh -type f | sort)
+if [ "$unwired" -eq 0 ]; then
+    echo "PASS: every test script is run by a workflow or by tests/run_all.sh"
+fi
+FAILURES=$((FAILURES + unwired))
+
 [ "$FAILURES" -eq 0 ]
