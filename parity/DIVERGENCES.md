@@ -107,6 +107,9 @@ What e190d3d changes:
     Nothing ever deletes it: the admin removes it after merging by hand.
 - **Test mocks:** the pull request's tests used mocks that wrote `.env` from `install_node_service_script` and
   `ensure_env_exists`. They now match the real functions.
+- **First install whose disable fails:** the pull request's test looked for a retained snapshot file, which only
+  the `.env` snapshot provided. A first install snapshots only the unit and the binary, and neither exists yet, so
+  there is no file to retain. The test now checks the retention message, and that `.env` was never snapshotted.
 - **Test file:** `tests/test_node_service_env_interleaving.sh`.
 
 ## Small fixes to upstream functions

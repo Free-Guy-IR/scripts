@@ -440,7 +440,8 @@ set -e
 assert_file "$ENV_FILE" "old-env" "first-install disable failure: environment untouched"
 [ ! -e "$SERVICE_UNIT" ] && [ ! -e "$SERVICE_BINARY_PATH" ] && pass "first-install disable failure: new artifacts removed" || fail "first-install disable failure: new artifacts removed"
 if [[ "$first_install_rollback_output" == *"may remain loaded or active"* ]]; then pass "first-install disable failure: orphaned unit is reported"; else fail "first-install disable failure: orphaned unit is reported"; fi
-if find "$CASE_DIR" -type f -name '.*.transaction.*' -print -quit | grep -q .; then pass "first-install disable failure: snapshots retained"; else fail "first-install disable failure: snapshots retained"; fi
+if [[ "$first_install_rollback_output" == *"Transaction backups were retained for retry or manual recovery."* ]]; then pass "first-install disable failure: the transaction is kept for manual recovery"; else fail "first-install disable failure: the transaction is kept for manual recovery"; fi
+if find "$CASE_DIR" -name '.*.env.transaction.*' -print -quit | grep -q .; then fail "first-install disable failure: .env was snapshotted"; else pass "first-install disable failure: .env was never snapshotted"; fi
 assert_lock_released "first-install disable failure: flock released"
 cleanup_node_service_transaction_backups
 service_installed() { return 0; }
