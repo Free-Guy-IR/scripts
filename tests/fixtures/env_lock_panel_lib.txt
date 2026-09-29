@@ -1,0 +1,6 @@
+write_backup_settings() {
+    sed -i "s/^BACKUP=.*/BACKUP=1/" "$ENV_FILE"
+}
+read_backup_settings() {
+    grep '^BACKUP=' "$ENV_FILE"
+}

@@ -114,8 +114,8 @@ mut_rm() {
 mut_chmod() {
     chmod 644 "$ENV_FILE"
 }
-### ok ok_locked_forms
-ok_locked_forms() {
+### flag mut_locked_direct_writes
+mut_locked_direct_writes() {
     acquire_node_env_lock || return 1
     sed -E -i "s/a/b/" "$ENV_FILE"
     echo X=1 | tee -a "$ENV_FILE" >/dev/null
@@ -139,7 +139,7 @@ ok_if_not_acquire() {
         colorized_echo red "could not lock $ENV_FILE"
         exit 1
     fi
-    sed -i "s/a/b/" "$ENV_FILE"
+    node_env_write sed "s/a/b/"
     release_node_env_lock
 }
 ### ok ok_block_scoped
@@ -148,7 +148,7 @@ ok_block_scoped() {
         if ! acquire_node_env_lock; then
             exit 1
         fi
-        sed -i "s/a/b/" "$ENV_FILE"
+        node_env_write sed "s/a/b/"
         release_node_env_lock
     fi
 }
@@ -218,4 +218,165 @@ ok_names_without_writing() {
     wait_for_something &
     grep -q '^A=' "$APP_DIR/.env" 2>/dev/null
     printf '%s\n' "$ENV_FILE" | grep -q .
+}
+### ok ok_locked_helper_writes
+ok_locked_helper_writes() {
+    acquire_node_env_lock || return 1
+    node_env_write sed "s/a/b/"
+    node_env_write append_unless '^X=' "X= 1"
+    node_env_write copy_from "$stage/env.example" || die "Could not write $APP_DIR/.env"
+    node_env_write harden
+    node_env_write replace "$working" "$target"
+    node_env_write move_in "$staged"
+    if false; then
+        release_node_env_lock
+        rm -f "$scratch"
+        exit 1
+    fi
+    node_env_write sed "s/c/d/"
+    release_node_env_lock
+}
+### ok ok_locked_context
+ok_locked_context() {
+    acquire_node_env_lock || return 1
+    apply_node_env_ssl_paths
+    release_node_env_lock
+}
+### ok ok_names_env_in_data
+ok_names_env_in_data() {
+    cat >"$unit" <<EOF
+EnvironmentFile=$ENV_FILE
+EOF
+    cp -p "$ENV_FILE" "$before"
+    staged=$(create_temp_file_in_dir "$dir" ".${target_name}.transaction.staged" "")
+    backup_path="${source_dir}/.${source_name}.transaction.$$.$RANDOM"
+    tar -czf "$backup" -C "$APP_DIR" .
+    cp "$tmp" "$APP_DIR/docker-compose.yml"
+}
+### flag mut_helper_unlocked
+mut_helper_unlocked() {
+    node_env_write sed "s/a/b/"
+}
+### flag mut_helper_after_release
+mut_helper_after_release() {
+    acquire_node_env_lock || return 1
+    release_node_env_lock
+    node_env_write sed "s/a/b/"
+}
+### flag mut_helper_conditional_acquire
+mut_helper_conditional_acquire() {
+    if [ -n "$x" ]; then
+        acquire_node_env_lock || exit 1
+    fi
+    node_env_write sed "s/a/b/"
+}
+### flag mut_helper_acquire_or_true
+mut_helper_acquire_or_true() {
+    acquire_node_env_lock || true
+    node_env_write sed "s/a/b/"
+}
+### flag mut_helper_background
+mut_helper_background() {
+    acquire_node_env_lock || return 1
+    node_env_write sed "s/a/b/" &
+    release_node_env_lock
+}
+### flag mut_helper_unknown_action
+mut_helper_unknown_action() {
+    acquire_node_env_lock || return 1
+    node_env_write truncate
+    release_node_env_lock
+}
+### flag mut_replace_outside_helper
+mut_replace_outside_helper() {
+    acquire_node_env_lock || return 1
+    replace_node_env_file "$target" "$copy"
+    release_node_env_lock
+}
+### flag mut_positional_helper
+mut_positional_helper() {
+    sed -i "s/a/b/" "$1/.env"
+}
+### flag mut_dot_slash
+mut_dot_slash() {
+    cd "$APP_DIR" || return 1
+    sed -i "s/a/b/" ./.env
+}
+### flag mut_expansion_default
+mut_expansion_default() {
+    sed -i "s/a/b/" "${ENV_FILE:-/opt/pg-node/.env}"
+}
+### flag mut_expansion_suffix
+mut_expansion_suffix() {
+    sed -i "s/a/b/" "${ENV_FILE%.bak}"
+}
+### flag mut_expansion_required
+mut_expansion_required() {
+    sed -i "s/a/b/" "${ENV_FILE:?}"
+}
+### flag mut_indirect
+mut_indirect() {
+    local var=ENV_FILE
+    sed -i "s/a/b/" "${!var}"
+}
+### flag mut_dirname_subst
+mut_dirname_subst() {
+    sed -i "s/a/b/" "$(dirname "$ENV_FILE")/.env"
+}
+### flag mut_mv_into_app_dir
+mut_mv_into_app_dir() {
+    mv -f "$stage/.env" "$APP_DIR/"
+}
+### flag mut_cp_into_app_dir
+mut_cp_into_app_dir() {
+    cp "$stage/.env" "$APP_DIR"
+}
+### flag mut_tar_into_app_dir
+mut_tar_into_app_dir() {
+    tar -xzf "$bundle" -C "$APP_DIR"
+}
+### flag mut_heredoc_to_bash
+mut_heredoc_to_bash() {
+    bash <<EOS
+sed -i "s/a/b/" "$ENV_FILE"
+EOS
+}
+### flag mut_heredoc_piped_to_sh
+mut_heredoc_piped_to_sh() {
+    cat <<EOS | sh
+sed -i "s/a/b/" "$ENV_FILE"
+EOS
+}
+### flag mut_name_from_parts
+mut_name_from_parts() {
+    local suffix=env
+    sed -i "s/a/b/" "$APP_DIR/.$suffix"
+}
+### flag mut_glob
+mut_glob() {
+    sed -i "s/a/b/" "$APP_DIR"/.en?
+}
+### flag mut_brace
+mut_brace() {
+    sed -i "s/a/b/" "$APP_DIR"/.{env,none}
+}
+### flag mut_rsync_into_app_dir
+mut_rsync_into_app_dir() {
+    rsync -a "$stage/" "$APP_DIR/"
+}
+### flag mut_calls_panel_lib_writer
+mut_calls_panel_lib_writer() {
+    write_backup_settings
+}
+### flag mut_shell_eval
+mut_shell_eval() {
+    eval "$command_text"
+}
+### flag mut_timeout_wrapper
+mut_timeout_wrapper() {
+    timeout 5 sed -i "s/a/b/" "$ENV_FILE"
+}
+### flag mut_timeout_signal_wrapper
+mut_timeout_signal_wrapper() {
+    timeout -s KILL 5 sed -i "s/a/b/" "$ENV_FILE"
 }

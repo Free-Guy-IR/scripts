@@ -105,6 +105,21 @@ install-now)
     INSTALL_SELF_SIGNED=true
     (install_node latest)
     ;;
+standalone-install-now)
+    source <(sed -n -e '/^ensure_standalone_assets() {/,/^}/p' -e '/^install_node() {/,/^}/p' "$SCRIPTS_ROOT/iran-sanction/pg-node-standalone.sh")
+    LOCAL_ENV_TEMPLATE="$CASE_DIR/standalone.env.example"
+    LOCAL_COMPOSE_TEMPLATE="$CASE_DIR/standalone-node.yml"
+    check_running_as_root() { :; }
+    gen_self_signed_cert() {
+        printf 'regenerated-cert\n' >"$SSL_CERT_FILE"
+        printf 'regenerated-key\n' >"$SSL_KEY_FILE"
+        chmod 600 "$SSL_KEY_FILE"
+    }
+    get_occupied_ports() { OCCUPIED_PORTS=""; }
+    is_port_occupied() { return 1; }
+    AUTO_CONFIRM=true
+    (install_node latest)
+    ;;
 edit-env-now)
     detect_os() { :; }
     check_editor() { :; }
@@ -406,6 +421,55 @@ if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
     fail "env lock: a completed install left its staged files behind"
 else
     pass "env lock: a completed install removes what it staged"
+fi
+export DATA_DIR="$WORK_DIR/data"
+
+setup_case env-lock-holds-off-standalone-install
+export DATA_DIR="$CASE_DIR/data"
+mkdir -p "$DATA_DIR/certs"
+printf 'pinned-cert\n' >"$DATA_DIR/certs/ssl_cert.pem"
+printf 'old-compose\n' >"$CASE_DIR/docker-compose.yml"
+printf 'SERVICE_PORT = 62050\nAPI_KEY = \n# SERVICE_PROTOCOL = "grpc"\nSSL_CERT_FILE = /var/lib/pg-node/certs/ssl_cert.pem\nSSL_KEY_FILE = /var/lib/pg-node/certs/ssl_key.pem\n' >"$CASE_DIR/standalone.env.example"
+printf 'services:\n  node:\n    image: bundled\n' >"$CASE_DIR/standalone-node.yml"
+cp "$ENV_FILE" "$CASE_DIR/env.before"
+exec 7>>"$ENV_FILE.lock"
+flock 7
+export NODE_ENV_LOCK_WAIT_SECONDS=1
+start_writer standalone-install-now
+wait "$WRITER_PID"
+install_rc=$?
+unset NODE_ENV_LOCK_WAIT_SECONDS
+flock -u 7
+exec 7>&-
+if [ "$install_rc" -ne 0 ] && grep -qx 'pinned-cert' "$DATA_DIR/certs/ssl_cert.pem" && cmp -s "$ENV_FILE" "$CASE_DIR/env.before" && grep -qx 'old-compose' "$CASE_DIR/docker-compose.yml"; then
+    pass "env lock: a standalone install that could not get the lock changed neither the TLS certificate, .env nor the compose file"
+else
+    fail "env lock: a standalone install ran without the .env lock or changed files before failing on it (exit $install_rc, cert: $(cat "$DATA_DIR/certs/ssl_cert.pem"))"
+fi
+if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
+    fail "env lock: a failed standalone install left its staged files behind"
+else
+    pass "env lock: a failed standalone install removes what it staged"
+fi
+start_writer standalone-install-now
+wait "$WRITER_PID"
+install_rc=$?
+if [ "$install_rc" -eq 0 ] && grep -qx 'regenerated-cert' "$DATA_DIR/certs/ssl_cert.pem" && grep -qx 'SERVICE_PORT= 62050' "$ENV_FILE" &&
+    grep -q '^API_KEY= [0-9a-f-]\{36\}$' "$ENV_FILE" && grep -qx "SSL_CERT_FILE= $DATA_DIR/certs/ssl_cert.pem" "$ENV_FILE" &&
+    cmp -s "$CASE_DIR/docker-compose.yml" "$CASE_DIR/standalone-node.yml"; then
+    pass "env lock: a standalone install with the lock free installs the certificate, .env and compose file"
+else
+    fail "env lock: a standalone install with the lock free did not install the certificate, .env or compose file (exit $install_rc)"
+fi
+if [ "$(stat -c %a "$DATA_DIR/certs/ssl_key.pem" 2>/dev/null)" = "600" ] && [ "$(stat -c %a "$ENV_FILE" 2>/dev/null)" = "600" ]; then
+    pass "env lock: the standalone install's private key and .env are owner-only"
+else
+    fail "env lock: the standalone install's private key or .env is readable by others"
+fi
+if find "$DATA_DIR" -maxdepth 1 -name '*staged*' | grep -q .; then
+    fail "env lock: a completed standalone install left its staged files behind"
+else
+    pass "env lock: a completed standalone install removes what it staged"
 fi
 export DATA_DIR="$WORK_DIR/data"
 

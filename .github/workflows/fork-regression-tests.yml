@@ -74,6 +74,9 @@ jobs:
       - name: Every .env write in pg-node.sh holds the .env lock
         run: bash tests/run_isolated.sh tests/test_env_writes_hold_lock.sh
 
+      - name: node_env_write refuses to change .env without the lock
+        run: bash tests/run_isolated.sh tests/test_node_env_write_requires_lock.sh
+
       - name: Fork workflows pin their actions and drop the job token
         run: bash tests/run_isolated.sh tests/test_fork_workflow_hardening.sh
 
