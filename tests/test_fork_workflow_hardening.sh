@@ -33,7 +33,23 @@ for workflow in "${FORK_WORKFLOWS[@]}"; do
         echo "FAIL: $workflow has $without_credentials checkout step(s) that keep the job token in .git/config"
         FAILURES=$((FAILURES + 1))
     fi
+    direct_runs="$(grep -nE '^[[:space:]]*run:[[:space:]]*bash[[:space:]]+tests/' "$path" |
+        grep -vE 'run:[[:space:]]*bash[[:space:]]+tests/run_isolated\.sh[[:space:]]+tests/')"
+    if [ -n "$direct_runs" ]; then
+        echo "FAIL: $workflow runs tests without tests/run_isolated.sh, so a leaked temporary file goes unnoticed:"
+        printf '%s\n' "$direct_runs" | sed 's/^/      /'
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "PASS: $workflow runs every test through tests/run_isolated.sh"
+    fi
 done
+
+if grep -qE 'bash[[:space:]]+"\$TESTS_DIR/run_isolated\.sh"[[:space:]]+"\$suite_path"' "$SCRIPTS_ROOT/tests/run_all.sh"; then
+    echo "PASS: tests/run_all.sh runs every suite through tests/run_isolated.sh"
+else
+    echo "FAIL: tests/run_all.sh runs suites without tests/run_isolated.sh, so a leaked temporary file goes unnoticed"
+    FAILURES=$((FAILURES + 1))
+fi
 
 unwired=0
 while IFS= read -r test_path; do
@@ -44,7 +60,7 @@ while IFS= read -r test_path; do
     fi
     echo "FAIL: $test_name is not run by any workflow or by tests/run_all.sh"
     unwired=$((unwired + 1))
-done < <(find "$SCRIPTS_ROOT/tests" -name '*.sh' ! -name run_all.sh -type f | sort)
+done < <(find "$SCRIPTS_ROOT/tests" -name '*.sh' ! -name run_all.sh ! -name run_isolated.sh -type f | sort)
 if [ "$unwired" -eq 0 ]; then
     echo "PASS: every test script is run by a workflow or by tests/run_all.sh"
 fi
