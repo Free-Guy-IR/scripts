@@ -1,101 +1,366 @@
 import re
+import shlex
 import sys
 
-
-env_target = r'"?\$\{?(?:ENV_FILE\}?|APP_DIR\}?/\.env|env_file\}?|target\}?|NODE_SERVICE_ENV_WRITE_TARGET\}?)"?'
-write_patterns = [
-    re.compile(r'\bsed\s+-i\b.*' + env_target + r'\s*(?:\|\||&&|;|$|\))'),
-    re.compile(r'(?<![<0-9&])>>?\s*' + env_target + r'(?:\s|$|;|\))'),
-    re.compile(r'\s-o\s+' + env_target + r'(?:\s|$|;)'),
-    re.compile(r'\bmv\s+(?:-f\s+)?"[^"]+"\s+' + env_target + r'(?:\s|$|;)'),
-    re.compile(r'\bharden_secret_file\s+' + env_target),
-    re.compile(r'\$EDITOR\s+' + env_target),
-]
-helpers_needing_lock = {
+ENV_REF = re.compile(
+    r'\\?\$(?:\{ENV_FILE\}|ENV_FILE\b|\{NODE_SERVICE_ENV_WRITE_TARGET\}|NODE_SERVICE_ENV_WRITE_TARGET\b)'
+    r'|"?\\?\$\{?APP_DIR\}?"?/\.env\b'
+)
+ASSIGNMENT = re.compile(r'^(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+FUNCTION_START = re.compile(
+    r'^(\s*)(?:function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*(?=\{)|([A-Za-z_][A-Za-z0-9_]*)\s*\(\))\s*([{(])(.*)$'
+)
+HELPERS_NEEDING_LOCK = {
     "apply_node_env_ssl_paths",
     "replace_node_env_file",
     "replace_node_service_api_port",
     "append_node_service_api_port",
 }
-function_start = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*[({]\s*$')
+READ_COMMANDS = {
+    "grep", "egrep", "fgrep", "cat", "head", "tail", "cmp", "diff", "cut", "sort", "uniq", "tr", "wc",
+    "test", "[", "[[", "stat", "sha256sum", "md5sum", "ls", "readlink", "realpath", "dirname", "basename",
+    "colorized_echo", "echo", "printf", "read", "file", "true", ":",
+}
+DESTINATION_LAST = {"cp", "mv", "install", "ln"}
+KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "(", "time", "exec"}
+WRITE_REDIRECT = re.compile(r'(?:[0-9]*|&)(?:>>|>\||>)(?!&)\s*$')
 
 
-def split_functions(lines):
-    functions = []
-    current = None
-    for number, line in enumerate(lines, 1):
-        match = function_start.match(line)
-        if match:
-            current = {"name": match.group(1), "lines": []}
-            functions.append(current)
-            continue
-        if current is not None:
-            if line in ("}", ")"):
-                current = None
-                continue
-            current["lines"].append((number, line))
-    return functions
-
-
-def is_comment(text):
+def strip_comment(text):
     stripped = text.lstrip()
-    return stripped.startswith("#") or stripped.startswith("colorized_echo ")
+    if stripped.startswith("#"):
+        return ""
+    return text
 
 
 def indentation(text):
     return len(text) - len(text.lstrip())
 
 
-def branch_leaves_function(body, index, text):
-    if re.search(r'\b(return|exit)\b', text):
-        return True
-    depth = indentation(text)
-    for _, following in body[index + 1:]:
-        if not following.strip():
+def find_functions(lines):
+    spans = []
+    stack = []
+    for index, line in enumerate(lines):
+        match = FUNCTION_START.match(line)
+        if match:
+            indent = len(match.group(1))
+            name = match.group(2) or match.group(3)
+            opener = match.group(4)
+            rest = match.group(5).strip()
+            closer = "}" if opener == "{" else ")"
+            if rest.endswith(closer) and rest not in ("", closer):
+                spans.append({"name": name, "start": index, "end": index, "indent": indent, "inline": rest[:-1]})
+                continue
+            if rest == closer:
+                spans.append({"name": name, "start": index, "end": index, "indent": indent, "inline": ""})
+                continue
+            stack.append({"name": name, "start": index, "indent": indent, "closer": closer})
             continue
-        if indentation(following) < depth:
+        if stack:
+            top = stack[-1]
+            if line.strip() == top["closer"] and indentation(line) == top["indent"]:
+                stack.pop()
+                spans.append({"name": top["name"], "start": top["start"], "end": index, "indent": top["indent"], "inline": None})
+    return spans
+
+
+def owned_lines(lines, spans):
+    owner = [None] * len(lines)
+    for span in sorted(spans, key=lambda s: s["end"] - s["start"], reverse=True):
+        for index in range(span["start"], span["end"] + 1):
+            owner[index] = span["name"]
+    groups = {}
+    for span in spans:
+        body = []
+        if span["inline"] is not None:
+            body.append((span["start"] + 1, span["indent"] + 4, span["inline"]))
+        else:
+            for index in range(span["start"] + 1, span["end"]):
+                if owner[index] == span["name"]:
+                    body.append((index + 1, indentation(lines[index]), lines[index]))
+        groups.setdefault(span["name"], []).extend(body)
+    top = [(index + 1, indentation(line), line) for index, line in enumerate(lines) if owner[index] is None]
+    groups["<top-level>"] = top
+    return groups
+
+
+def split_commands(text):
+    segments = []
+    current = []
+    quote = None
+    depth = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                current.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if text.startswith("$(", index):
+            depth += 1
+            start = index + 2
+            level = 1
+            scan = start
+            inner_quote = None
+            while scan < len(text) and level:
+                c = text[scan]
+                if inner_quote:
+                    if c == inner_quote:
+                        inner_quote = None
+                elif c in ("'", '"'):
+                    inner_quote = c
+                elif text.startswith("$(", scan):
+                    level += 1
+                    scan += 1
+                elif c == ")":
+                    level -= 1
+                scan += 1
+            inner = text[start:scan - 1]
+            segments.extend(split_commands(inner))
+            current.append("__SUBST__")
+            index = scan
+            depth -= 1
+            continue
+        if text.startswith("&&", index) or text.startswith("||", index):
+            segments.append("".join(current))
+            current = []
+            index += 2
+            continue
+        if char in (";", "|") and not text.startswith("|&", index):
+            if char == "|" and index > 0 and text[index - 1] == ">":
+                current.append(char)
+                index += 1
+                continue
+            segments.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments if segment.strip()]
+
+
+def env_refs(segment, aliases):
+    refs = []
+    for match in ENV_REF.finditer(segment):
+        after = segment[match.end():match.end() + 1]
+        if after and (after == "." or after.isalnum() or after == "_"):
+            continue
+        refs.append((match.start(), match.end()))
+    for alias in aliases:
+        for match in re.finditer(r'\$\{?' + re.escape(alias) + r'\b\}?', segment):
+            after = segment[match.end():match.end() + 1]
+            if after and (after == "." or after.isalnum() or after == "_"):
+                continue
+            refs.append((match.start(), match.end()))
+    return sorted(refs)
+
+
+def command_words(segment):
+    try:
+        words = shlex.split(segment, posix=True)
+    except ValueError:
+        words = segment.split()
+    while words and (words[0] in KEYWORDS or re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0])):
+        words = words[1:]
+    return words
+
+
+def classify_segment(segment, aliases):
+    refs = env_refs(segment, aliases)
+    if not refs:
+        return None
+    for start, _ in refs:
+        if WRITE_REDIRECT.search(segment[:start].rstrip('"')):
+            return "write"
+    stripped = segment
+    for start, end in reversed(refs):
+        before = segment[:start]
+        if re.search(r'<\s*"?$', before):
+            stripped = stripped[:start] + "__READ__" + stripped[end:]
+    if not env_refs(stripped, aliases):
+        return "read"
+    words = command_words(segment)
+    if not words:
+        return "read"
+    command = words[0]
+    if command in ("sed",):
+        in_place = any(
+            word == "--in-place" or word.startswith("--in-place=") or re.match(r'^-[A-Za-z]*i', word)
+            for word in words[1:]
+        )
+        return "write" if in_place else "read"
+    if command == "awk":
+        return "write" if "inplace" in segment else "read"
+    if command in READ_COMMANDS:
+        return "read"
+    if command in DESTINATION_LAST:
+        arguments = [word for word in words[1:] if not word.startswith("-")]
+        if arguments and env_refs(arguments[-1], aliases):
+            return "write"
+        last = segment.rstrip().rsplit(None, 1)[-1]
+        return "write" if env_refs(last, aliases) else "read"
+    if command == "curl":
+        return "write" if re.search(r'(?:-o|--output)\s+"?' + ENV_REF.pattern, segment) else "read"
+    if command == "dd":
+        return "write" if re.search(r'\bof="?\\?\$', segment) and "of=" in segment and env_refs(segment[segment.index("of="):], aliases) else "read"
+    return "write"
+
+
+def line_aliases(text, aliases):
+    for segment in split_commands(text):
+        match = ASSIGNMENT.match(segment.strip())
+        if not match:
+            continue
+        name, value = match.group(1), match.group(2)
+        if env_refs(value, aliases) or "node_env_write_target" in value or "__SUBST__" in value and "node_env_write_target" in text:
+            aliases.add(name)
+
+
+ACQUIRE = re.compile(r'\bacquire_node_env_lock\b')
+RELEASE = re.compile(r'\brelease_node_env_lock\b')
+
+
+def leaves(text):
+    return re.search(r'\b(return|exit)\b', text) is not None
+
+
+def branch_leaves_function(body, position, depth):
+    for _, indent, text in body[position + 1:]:
+        if not text.strip() or not strip_comment(text).strip():
+            continue
+        if indent < depth:
             return False
-        if re.match(r'\s*(return|exit)\b', following):
+        if re.match(r'\s*(return|exit)\b', text):
             return True
     return False
 
 
-def locked_lines(body):
-    held = False
-    result = {}
-    for index, (number, text) in enumerate(body):
-        if is_comment(text):
+def open_quote_at_end(text, state):
+    quote = state
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = None
+        else:
+            if char == "\\":
+                index += 1
+            elif char == "#" and (index == 0 or text[index - 1] in " \t;"):
+                break
+            elif char in ("'", '"'):
+                quote = char
+        index += 1
+    return quote
+
+
+HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+
+
+def logical_lines(body):
+    merged = []
+    buffer = None
+    quote = None
+    heredoc = None
+    for number, indent, raw in body:
+        if heredoc is not None:
+            if raw.strip() == heredoc:
+                heredoc = None
             continue
-        if re.search(r'\bacquire_node_env_lock\b', text) and not re.search(r'\|\|\s*\{?\s*$', text.split("acquire_node_env_lock")[0]):
-            held = True
-        result[number] = held
-        if re.search(r'\brelease_node_env_lock\b', text):
-            if not branch_leaves_function(body, index, text):
-                held = False
-    return result
+        if buffer is None:
+            buffer = [number, indent, raw]
+        else:
+            buffer[2] = buffer[2] + "\n" + raw
+        quote = open_quote_at_end(raw, quote)
+        if quote is None and not raw.rstrip().endswith("\\"):
+            match = HEREDOC.search(strip_comment(buffer[2]))
+            merged.append(tuple(buffer))
+            buffer = None
+            if match:
+                heredoc = match.group(1)
+    if buffer is not None:
+        merged.append(tuple(buffer))
+    return merged
+
+
+def analyze_body(name, body, label):
+    body = logical_lines(body)
+    problems = []
+    writes = 0
+    aliases = set()
+    held = []
+    pending = []
+    for position, (number, indent, raw) in enumerate(body):
+        text = strip_comment(raw)
+        if not text.strip():
+            continue
+        while held and indent < held[-1]:
+            held.pop()
+        closing = text.strip()
+        for pending_entry in list(pending):
+            if indent == pending_entry["indent"] and closing in (pending_entry["closer"],) and pending_entry["leaves"]:
+                held.append(pending_entry["indent"])
+                pending.remove(pending_entry)
+            elif indent < pending_entry["indent"]:
+                pending.remove(pending_entry)
+        for pending_entry in pending:
+            if position > pending_entry["position"] and leaves(text):
+                pending_entry["leaves"] = True
+        is_held = bool(held)
+        line_aliases(text, aliases)
+        if ACQUIRE.search(text):
+            if re.search(r'\bif\s+!\s*acquire_node_env_lock\b', text):
+                pending.append({"indent": indent, "closer": "fi", "leaves": False, "position": position})
+            elif re.search(r'acquire_node_env_lock[^|]*\|\|\s*(return|exit)\b', text):
+                held.append(indent)
+            elif re.search(r'acquire_node_env_lock[^|]*\|\|\s*\{\s*$', text):
+                pending.append({"indent": indent, "closer": "}", "leaves": False, "position": position})
+        if RELEASE.search(text) and not leaves(text) and not branch_leaves_function(body, position, indent):
+            held.clear()
+        if name in HELPERS_NEEDING_LOCK:
+            continue
+        for segment in split_commands(text):
+            verdict = classify_segment(segment, aliases)
+            if verdict == "write":
+                writes += 1
+                if not is_held:
+                    problems.append(f"{label}:{number}: {name} writes .env outside the .env lock: {raw.strip()}")
+            words = command_words(segment)
+            if words and words[0] in HELPERS_NEEDING_LOCK and not is_held:
+                problems.append(f"{label}:{number}: {name} calls {words[0]}, which writes .env, outside the .env lock")
+            if words and words[0] == "curl" and is_held and "--max-time" not in segment:
+                problems.append(f"{label}:{number}: {name} holds the .env lock across a curl without --max-time")
+    return writes, problems
 
 
 def analyze(lines, label):
+    spans = find_functions(lines)
+    groups = owned_lines(lines, spans)
+    writes = 0
     problems = []
-    checked = 0
-    for function in split_functions(lines):
-        name = function["name"]
-        body = function["lines"]
-        held = locked_lines(body)
-        for number, text in body:
-            if is_comment(text):
-                continue
-            if any(pattern.search(text) for pattern in write_patterns):
-                checked += 1
-                if name in helpers_needing_lock:
-                    continue
-                if not held.get(number):
-                    problems.append(f"{label}:{number}: {name} writes .env outside the .env lock: {text.strip()}")
-            for helper in helpers_needing_lock:
-                if helper != name and re.search(r'(^|[\s;|&(])' + helper + r'(\s|$|;)', text):
-                    if not held.get(number):
-                        problems.append(f"{label}:{number}: {name} calls {helper}, which writes .env, outside the .env lock")
-    return checked, problems
+    for name, body in groups.items():
+        count, found = analyze_body(name, body, label)
+        writes += count
+        problems.extend(found)
+    return writes, problems
 
 
 def load_probes(path):
@@ -113,7 +378,8 @@ def flagged_names(problems):
 
 def check_probes(path):
     expected = load_probes(path)
-    _, problems = analyze(open(path, encoding="utf-8").read().splitlines(), path)
+    lines = [line for line in open(path, encoding="utf-8").read().splitlines() if not line.startswith("###")]
+    _, problems = analyze(lines, path)
     flagged = flagged_names(problems)
     failures = 0
     for name, verdict in sorted(expected.items()):
@@ -121,7 +387,8 @@ def check_probes(path):
             print(f"FAIL: probe {name} writes .env without the lock but the analyzer did not flag it")
             failures += 1
         if verdict == "ok" and name in flagged:
-            print(f"FAIL: probe {name} holds the lock but the analyzer flagged it")
+            detail = "; ".join(problem for problem in problems if problem.split(": ")[1].startswith(name + " "))
+            print(f"FAIL: probe {name} holds the lock or only reads but the analyzer flagged it: {detail}")
             failures += 1
     if failures == 0:
         print(f"PASS: the analyzer judges all {len(expected)} probes correctly")
@@ -129,13 +396,13 @@ def check_probes(path):
 
 
 def check_source(path):
-    checked, problems = analyze(open(path, encoding="utf-8").read().splitlines(), path)
-    if checked == 0:
+    writes, problems = analyze(open(path, encoding="utf-8").read().splitlines(), path)
+    if writes == 0:
         problems.append("no .env write was recognised; the analyzer no longer matches the code")
     for problem in problems:
         print("FAIL: " + problem)
     if not problems:
-        print(f"PASS: all {checked} .env writes in {path} happen while the .env lock is held")
+        print(f"PASS: all {writes} .env writes in {path} happen while the .env lock is held")
     return len(problems)
 
 
