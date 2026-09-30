@@ -11,7 +11,17 @@ Nothing here has been run yet.
 - `parity/ROLLOUT.md` "Before every push to main" has passed for `C`.
 - The host list comes from the KG fleet inventory. The node containers keep running throughout: `install-script`
   replaces only the CLI and its libraries.
-- Every command below runs as root in a fresh empty directory:
+- Every command below runs as root. At the start of each host, create one directory for the files of `C`, and
+  record its path in the KG, because steps 3, 4 and 5 use it by absolute path:
+
+  ```bash
+  mig=$(mktemp -d /root/fork-migration.XXXXXX)
+  chmod 700 "$mig"
+  echo "$mig"
+  ```
+
+  If the shell is lost between steps, set `mig` again from the recorded path before going on.
+- Every script runs from a fresh empty directory, never from `$mig`:
 
   ```bash
   cd "$(mktemp -d)"
@@ -99,22 +109,32 @@ sha256sum "$backup"
 
 ## 3. Migrate each copy
 
-Run each command from a fresh empty directory (see step 0). Download with a time limit, then run the file:
+First download the files of `C` into `$mig`, with a time limit:
+
+```bash
+curl -fsSL --connect-timeout 15 --max-time 60 https://github.com/Free-Guy-IR/scripts/raw/C/pasarguard.sh -o "$mig/pasarguard.C.sh"
+curl -fsSL --connect-timeout 15 --max-time 60 https://github.com/Free-Guy-IR/scripts/raw/C/pg-node.sh -o "$mig/pg-node.C.sh"
+mkdir -p "$mig/lib"
+for lib in common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh; do
+    curl -fsSL --connect-timeout 15 --max-time 60 "https://github.com/Free-Guy-IR/scripts/raw/C/lib/$lib" -o "$mig/lib/$lib"
+done
+sha256sum "$mig"/*.C.sh "$mig"/lib/*.sh
+```
+
+Record the checksums in the KG. Then run each copy from a fresh empty directory (see step 0):
 
 - **`pasarguard` (panel hosts):**
 
   ```bash
   cd "$(mktemp -d)"
-  curl -fsSL --connect-timeout 15 --max-time 60 https://github.com/Free-Guy-IR/scripts/raw/C/pasarguard.sh -o pasarguard.C.sh
-  bash -c "$(cat pasarguard.C.sh)" @ install-script
+  bash -c "$(cat "$mig/pasarguard.C.sh")" @ install-script
   ```
 
 - **`pg-node` under the default name:**
 
   ```bash
   cd "$(mktemp -d)"
-  curl -fsSL --connect-timeout 15 --max-time 60 https://github.com/Free-Guy-IR/scripts/raw/C/pg-node.sh -o pg-node.C.sh
-  bash -c "$(cat pg-node.C.sh)" @ install-script
+  bash -c "$(cat "$mig/pg-node.C.sh")" @ install-script
   ```
 
 - **A custom-named node `N`** (APP_NAME from step 1):
@@ -124,9 +144,8 @@ Run each command from a fresh empty directory (see step 0). Download with a time
 
   ```bash
   cd "$(mktemp -d)"
-  curl -fsSL --connect-timeout 15 --max-time 60 https://github.com/Free-Guy-IR/scripts/raw/C/pg-node.sh -o pg-node.C.sh
   mv /usr/local/bin/N /root/N.pre-fork-migration
-  bash -c "$(cat pg-node.C.sh)" @ install-script --name N
+  bash -c "$(cat "$mig/pg-node.C.sh")" @ install-script --name N
   ```
 
 Run the copies of one host one after another, never in parallel. They share the library directory.
@@ -151,21 +170,32 @@ Step 4 checks these effects, and step 5 undoes them.
   So reset that one line before comparing. `pasarguard.sh` is installed unchanged:
 
   ```bash
-  cmp /usr/local/bin/pasarguard pasarguard.C.sh
-  sed 's|^APP_NAME=.*|APP_NAME=""|' /usr/local/bin/pg-node | cmp - pg-node.C.sh
-  sed 's|^APP_NAME=.*|APP_NAME=""|' /usr/local/bin/N | cmp - pg-node.C.sh
+  cmp /usr/local/bin/pasarguard "$mig/pasarguard.C.sh"
+  sed 's|^APP_NAME=.*|APP_NAME=""|' /usr/local/bin/pg-node | cmp - "$mig/pg-node.C.sh"
+  sed 's|^APP_NAME=.*|APP_NAME=""|' /usr/local/bin/N | cmp - "$mig/pg-node.C.sh"
   for lib in /usr/local/lib/pasarguard-scripts/lib/*.sh; do
-      curl -fsSL --connect-timeout 15 --max-time 60 "https://github.com/Free-Guy-IR/scripts/raw/C/lib/$(basename "$lib")" | cmp - "$lib"
+      cmp "$lib" "$mig/lib/$(basename "$lib")"
   done
   ```
 
-- **Check each `.env` against the backup.** The only allowed difference is the `SSL_CERT_FILE` and `SSL_KEY_FILE`
-  lines that `sync_env_ssl_paths` moved to the node's own `DATA_DIR`. Any other difference: stop and roll back that
-  host.
+  These are all the libraries `install-script` installs. A library on the host that is not in `$mig/lib` came
+  from somewhere else: record it and ask the owner. A difference in a script or a library means the migration
+  did not install `C`: roll back that host (step 5).
+- **Check each `.env` against the backup.**
 
   ```bash
   diff <(tar -xzOf "$backup" opt/N/.env) /opt/N/.env
   ```
+
+  `install-script` changes at most the `SSL_CERT_FILE` and `SSL_KEY_FILE` lines, which `sync_env_ssl_paths`
+  moves to the node's own `DATA_DIR`. Sort every difference into one of three cases:
+  - **Only those two lines:** expected. Go on.
+  - **Other keys, each explained by a legitimate write since the backup:** for example `API_PORT`,
+    `XRAY_EXECUTABLE_PATH` or `XRAY_ASSETS_PATH` from a panel action, or an admin's `edit-env`. The migration did
+    not make them, so they are no reason to roll back, and step 5 must keep them. Record each key and what wrote
+    it in the KG.
+  - **A difference nothing explains:** stop. Do not touch that `.env`, do not roll back the scripts for it, and
+    hand it to the owner. The scripts cannot have made it, because they write only the two SSL lines.
 
 - `<copy> status` works. On node hosts, `systemctl is-active <N>-service` shows the same state as before. On the
   panel host, the dashboard renders and one subscription page loads.
@@ -179,17 +209,28 @@ Step 4 checks these effects, and step 5 undoes them.
    tar -xzf "$backup" -C / usr/local/bin usr/local/lib/pasarguard-scripts
    ```
 
-2. **Restore each `.env` only if nothing else has written it since.**
-   - Compare the live `.env` with the backup, as in step 4.
-   - If the only difference is the SSL lines from `sync_env_ssl_paths`, restore it from the archive:
+2. **Undo only the migration's own `.env` change.** Compare the live `.env` with the backup, as in step 4, and
+   use the same three cases:
+   - **Only the two SSL lines differ:** restore the file from the archive:
 
      ```bash
      tar -xzf "$backup" -C / opt/N/.env
      ```
 
-   - If anything else differs, a later legitimate write happened, for example `API_PORT`, `XRAY_EXECUTABLE_PATH`
-     or `XRAY_ASSETS_PATH` from a panel action. Do not overwrite it. Revert only the two SSL lines by hand, and
-     record that in the KG.
+   - **Other keys differ too, each explained:** those later writes stay. Take the lock the scripts use, then put
+     back only the two SSL lines from the backup, and record that in the KG:
+
+     ```bash
+     (
+         flock -w 30 9 || { echo "/opt/N/.env is locked by a running command; try again"; exit 1; }
+         for key in SSL_CERT_FILE SSL_KEY_FILE; do
+             old=$(tar -xzOf "$backup" opt/N/.env | grep -m1 "^[[:space:]]*$key[[:space:]]*=")
+             [ -n "$old" ] && sed -i "s|^[[:space:]]*$key[[:space:]]*=.*|$old|" /opt/N/.env
+         done
+     ) 9>>/opt/N/.env.lock
+     ```
+
+   - **A difference nothing explains:** leave `.env` alone and hand it to the owner, as in step 4.
 3. **Remove what the migration created.** Compare `ls -la /opt/N /var/lib/N` with the step 1 record, then remove
    only these entries, and only if they were not there before:
    - `/opt/N/.env.lock`
@@ -198,7 +239,7 @@ Step 4 checks these effects, and step 5 undoes them.
    Leave any `..env.edit-*` file in place and tell the owner. It is an admin's unsaved `edit-env` copy, and it
    holds `API_KEY`.
 4. **Keep the moved-aside copies until the host is verified.** Remove `/root/N.pre-fork-migration` only after
-   that, whether the host was rolled back or verified.
+   that, whether the host was rolled back or verified. Remove `$mig` at the same time.
 
 A restored copy's next run refreshes the libraries from its own old fetch repository again.
 
