@@ -189,4 +189,10 @@ Every workflow test step, and every suite in `tests/run_all.sh`, runs through `t
 gives the test a private `TMPDIR`, fails it when it leaves anything there, and removes the directory either way.
 It exists because `pg-node.sh`'s transaction and staging code runs `trap - EXIT` in the caller's shell, which
 silently dropped the cleanup trap of tests that source it; their `WORK_DIR`s piled up in `/tmp` on the test host.
+The harness also lists, before and after the test, the entries the current user owns in `/tmp`, `/var/tmp`,
+`/dev/shm` and the scripts' fallback temporary roots (`/var/lib/pasarguard-scripts/tmp`,
+`/var/lib/pasarguard/tmp`, `/var/lib/pg-node/tmp`), or in `RUN_ISOLATED_WATCH`. A new entry left there fails the
+test when `RUN_ISOLATED_STRICT=true` or `CI=true`, and is a warning otherwise, because on a shared test host another
+process of the same user can create one at the same time. The harness never deletes anything outside its own
+`TMPDIR`. Files a test leaves anywhere else, such as a path it builds itself, are outside this check.
 In `tests/run_all.sh` the fork adds the two PR #25 suites and calls each suite through the harness.
