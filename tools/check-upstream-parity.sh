@@ -5,6 +5,8 @@ upstream_remote="${UPSTREAM_REMOTE:-upstream}"
 ledger="${PARITY_LEDGER:-parity/ledger.tsv}"
 open_prs_file="${OPEN_PRS_FILE:-}"
 upstream_github_repo="${UPSTREAM_GITHUB_REPO:-}"
+expected_upstream="${PARITY_EXPECTED_UPSTREAM:-github.com/PasarGuard/scripts}"
+allow_no_open_prs="${PARITY_ALLOW_NO_OPEN_PRS:-false}"
 open_prs_source=""
 fork_ref="${FORK_REF:-HEAD}"
 problems=0
@@ -40,6 +42,25 @@ github_repo_of_remote() {
     printf '%s\n' "$url"
 }
 
+upstream_identity() {
+    local url repo
+    url="$(git remote get-url "$1" 2>/dev/null)" || return 1
+    case "$url" in
+    https://github.com/* | ssh://*@github.com/* | *@github.com:*)
+        repo="$(github_repo_of_remote "$1")" || return 1
+        printf 'github.com/%s\n' "$repo"
+        ;;
+    *) printf '%s\n' "$url" ;;
+    esac
+}
+
+same_identity() {
+    case "$1" in
+    github.com/*) [ "$(tr '[:upper:]' '[:lower:]' <<<"$1")" = "$(tr '[:upper:]' '[:lower:]' <<<"$2")" ] ;;
+    *) [ "$1" = "$2" ] ;;
+    esac
+}
+
 list_open_pull_requests() {
     local repo="$1" page=1 batch count
     local auth=()
@@ -61,13 +82,33 @@ if [ ! -f "$ledger" ]; then
     report "ledger $ledger not found"
     exit 1
 fi
+if ! actual_upstream="$(upstream_identity "$upstream_remote")"; then
+    report "the $upstream_remote remote does not exist or its URL cannot be read"
+    exit 1
+fi
+if ! same_identity "$expected_upstream" "$actual_upstream"; then
+    report "the $upstream_remote remote points at $actual_upstream, which is not $expected_upstream"
+    exit 1
+fi
+if [ "$expected_upstream" != "github.com/PasarGuard/scripts" ]; then
+    printf 'PARITY: the expected upstream is overridden to %s by PARITY_EXPECTED_UPSTREAM\n' "$expected_upstream"
+fi
+case "$expected_upstream" in
+github.com/*)
+    if [ -n "$upstream_github_repo" ] && ! same_identity "$expected_upstream" "github.com/$upstream_github_repo"; then
+        report "UPSTREAM_GITHUB_REPO=$upstream_github_repo is not the upstream $expected_upstream"
+        exit 1
+    fi
+    upstream_github_repo="${upstream_github_repo:-${actual_upstream#github.com/}}"
+    ;;
+esac
 if ! git rev-parse --verify -q "refs/remotes/${upstream_remote}/main" >/dev/null; then
     report "refs/remotes/${upstream_remote}/main does not exist; fetch the upstream remote before checking parity"
     exit 1
 fi
 if [ -n "$open_prs_file" ]; then
-    if [ ! -r "$open_prs_file" ]; then
-        report "OPEN_PRS_FILE $open_prs_file is not readable"
+    if [ ! -f "$open_prs_file" ] || [ ! -r "$open_prs_file" ]; then
+        report "OPEN_PRS_FILE $open_prs_file is not a readable regular file"
         exit 1
     fi
     open_prs_source="read from OPEN_PRS_FILE $open_prs_file"
@@ -87,6 +128,17 @@ else
         exit 1
     fi
     open_prs_source="fetched from the GitHub API for $upstream_github_repo"
+fi
+if grep -v -E -q -e $'^[0-9]+\t[0-9a-f]{40}$' "$open_prs_file"; then
+    report "the open pull request list ($open_prs_source) is malformed; every line must be a number, a tab and a 40-character SHA"
+    exit 1
+fi
+if ! grep -q . "$open_prs_file"; then
+    if [ "$allow_no_open_prs" != true ]; then
+        report "the open pull request list ($open_prs_source) is empty; if upstream really has none, rerun with PARITY_ALLOW_NO_OPEN_PRS=true"
+        exit 1
+    fi
+    open_prs_source="$open_prs_source, empty, waived by PARITY_ALLOW_NO_OPEN_PRS"
 fi
 
 if ! remote_refs="$(git ls-remote --refs --heads --tags "$upstream_remote")" || [ -z "$remote_refs" ]; then

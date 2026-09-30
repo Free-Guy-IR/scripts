@@ -16,6 +16,12 @@ The check trusts nothing it did not see itself:
 - Without `OPEN_PRS_FILE` it lists the open pull requests from the GitHub API itself, reads every page, and fails
   when the API is unreachable or answers with anything but a list. The output says where the list came from.
   `OPEN_PRS_FILE` exists for the tests; a parity claim must come from a run without it.
+- The pull request list must be well formed (a number, a tab and a 40-character SHA per line) and, when given as a
+  file, a regular file, so `OPEN_PRS_FILE=/dev/null` fails. An empty list fails unless `PARITY_ALLOW_NO_OPEN_PRS=true`
+  waives it, and the output then says it was waived.
+- The upstream remote must be `github.com/PasarGuard/scripts` (any GitHub URL form, any letter case), so a mirror
+  or the fork itself fails. `UPSTREAM_GITHUB_REPO` cannot point the pull request check at another repository.
+  `PARITY_EXPECTED_UPSTREAM` overrides the expected upstream for the tests, and the output says so.
 
 To check parity from a local clone:
 
