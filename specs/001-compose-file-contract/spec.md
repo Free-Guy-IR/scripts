@@ -113,8 +113,11 @@ the requested image into the base file.
 
 - **FR-001**: Every Compose call made by `pasarguard`, `pg-node`, the standalone wrappers and the
   shared libraries MUST load the base compose file and, when one exists next to it, the override
-  that Compose itself would load in that directory. The only exception is the two read-only
-  `ps -q` database-container lookups in the upstream-identical `lib/pasarguard-backup.sh`.
+  that Compose itself would load in that directory. The upstream-identical
+  `lib/pasarguard-backup.sh` and `lib/pasarguard-restore.sh` are the only exception: their own
+  Compose calls only list services and containers, or start the database during `restore --fresh`
+  on an empty server, and every stop and start of an existing installation goes through
+  `compose_up`, `compose_down` and the scripts' service functions, which carry the fix.
 - **FR-002**: The override MUST be chosen as the first existing regular file among
   `compose.override.yml`, `compose.override.yaml`, `docker-compose.override.yml` and
   `docker-compose.override.yaml` in the base file's directory, and it MUST be loaded after the
@@ -157,5 +160,5 @@ the requested image into the base file.
 - Production rollout is the owner's decision. The production panel's installed `pasarguard`
   currently fetches upstream's libraries, so it gains this fix only after its migration to the
   fork's scripts.
-- `lib/pasarguard-backup.sh` is upstream-identical and only lists database containers with
-  `ps -q`, which never recreates a container; it stays unchanged to keep it upstream-identical.
+- `lib/pasarguard-backup.sh` and `lib/pasarguard-restore.sh` stay upstream-identical, as FR-001
+  describes.

@@ -72,6 +72,10 @@ source "$SHARED_LIB_DIR/system.sh"
 source "$SHARED_LIB_DIR/docker.sh"
 # shellcheck source=lib/github.sh
 source "$SHARED_LIB_DIR/github.sh"
+if ! declare -F compose_cmd >/dev/null; then
+    printf 'Shared library %s is older than this script. Rerun it with network access, or reinstall the script with install-script.\n' "$SHARED_LIB_DIR/docker.sh" >&2
+    exit 1
+fi
 
 # Validate a user-supplied instance name (--name). The value flows into
 # filesystem paths, the systemd unit (body + filename), sed/yq programs and
@@ -2183,6 +2187,7 @@ install_node() {
     # Final sync to ensure env has the correct SSL paths for custom names
     sync_env_ssl_paths
     colorized_echo green "✓ docker-compose.yml modified successfully"
+    compose_override_notice
 }
 # Remove the pg-node script from /usr/local/bin.
 uninstall_node_script() {
@@ -2396,7 +2401,7 @@ update_node_script() {
 
 # Pull latest Docker images for the node services.
 update_node() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
+    compose_cmd -p "$APP_NAME" pull
 }
 
 # Check if node application directory exists.
@@ -2466,7 +2471,7 @@ apply_node_env_ssl_paths() {
 
 # Check if node Docker containers are created or running.
 is_node_up() {
-    if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
+    if [ -z "$(compose_cmd ps -q -a)" ]; then
         return 1
     else
         return 0
@@ -3208,7 +3213,7 @@ status_command() {
     fi
     echo -n "Status: "
     colorized_echo green "Up"
-    json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
+    json=$(compose_cmd ps -a --format=json)
     services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
     states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
     # Print out the service names and statuses

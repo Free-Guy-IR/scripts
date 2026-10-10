@@ -497,6 +497,7 @@ install_node() {
     rm -rf "$install_stage"
     trap - EXIT
     colorized_echo green "Bundled node configuration prepared successfully"
+    compose_override_notice
 }
 
 # Warn that automatic script updates are disabled in standalone distribution.

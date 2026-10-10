@@ -61,23 +61,52 @@ ensure_docker_compose() {
     colorized_echo green "Docker Compose v2 plugin installed"
 }
 
+compose_override_file() {
+    local compose_dir candidate
+    compose_dir="$(dirname -- "$COMPOSE_FILE")"
+    for candidate in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
+        if [ -f "$compose_dir/$candidate" ]; then
+            printf '%s\n' "$compose_dir/$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+compose_cmd() {
+    local override_file
+    if override_file="$(compose_override_file)"; then
+        $COMPOSE -f "$COMPOSE_FILE" -f "$override_file" "$@"
+    else
+        $COMPOSE -f "$COMPOSE_FILE" "$@"
+    fi
+}
+
+compose_override_notice() {
+    local override_file
+    if override_file="$(compose_override_file)"; then
+        colorized_echo yellow "Compose also loads $override_file; its settings, such as a pinned image, take precedence over $COMPOSE_FILE."
+    fi
+    return 0
+}
+
 # Start all containers defined in COMPOSE_FILE in detached mode with orphan removal.
 compose_up() {
     ensure_docker_service_running
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --remove-orphans
+    compose_cmd -p "$APP_NAME" up -d --remove-orphans
 }
 
 # Stop and remove containers and networks defined in COMPOSE_FILE.
 compose_down() {
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" down
+    compose_cmd -p "$APP_NAME" down
 }
 
 # View recent aggregate logs from services defined in COMPOSE_FILE.
 compose_logs() {
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" logs
+    compose_cmd -p "$APP_NAME" logs
 }
 
 # Stream and follow live log output from services defined in COMPOSE_FILE.
 compose_logs_follow() {
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" logs -f
+    compose_cmd -p "$APP_NAME" logs -f
 }

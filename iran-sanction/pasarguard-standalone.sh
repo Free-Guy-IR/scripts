@@ -479,6 +479,7 @@ install_pasarguard() {
     fi
     set_pasarguard_panel_image "$target_image"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
+    compose_override_notice
     colorized_echo green "pasarguard installed successfully"
 }
 

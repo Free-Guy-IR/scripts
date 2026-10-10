@@ -78,6 +78,10 @@ source "$SHARED_LIB_DIR/env.sh"
 source "$SHARED_LIB_DIR/pasarguard-backup.sh"
 # shellcheck source=lib/pasarguard-restore.sh
 source "$SHARED_LIB_DIR/pasarguard-restore.sh"
+if ! declare -F compose_cmd >/dev/null; then
+    printf 'Shared library %s is older than this script. Rerun it with network access, or reinstall the script with install-script.\n' "$SHARED_LIB_DIR/docker.sh" >&2
+    exit 1
+fi
 
 # Handle @ symbol if used in installation (skip it)
 if [ "${1:-}" = "@" ]; then
@@ -780,7 +784,7 @@ compose_service_exists() {
     local service_name="$1"
     [ -z "$service_name" ] && return 1
     local services
-    services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null) || return 1
+    services=$(compose_cmd -p "$APP_NAME" config --services 2>/dev/null) || return 1
     grep -Fxq "$service_name" <<< "$services"
 }
 
@@ -789,7 +793,7 @@ compose_service_exists() {
 #   Writes service names line-by-line to stdout.
 list_pasarguard_app_services() {
     local detected_services=""
-    detected_services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
+    detected_services=$(compose_cmd -p "$APP_NAME" config 2>/dev/null | awk '
         BEGIN { in_services = 0; service = ""; is_app = 0 }
         # Flush the currently parsed service if it matches app criteria.
         function flush_service() {
@@ -863,7 +867,7 @@ detect_pasarguard_backend_service() {
         fi
     done
 
-    service_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
+    service_name=$(compose_cmd -p "$APP_NAME" config 2>/dev/null | awk '
         BEGIN { in_services = 0; service = ""; is_backend = 0 }
         # Flush the currently parsed service if it matches backend criteria.
         function flush_service() {
@@ -926,7 +930,7 @@ stop_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
     [ -z "$services" ] && services="pasarguard"
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop $services 2>/dev/null || true
+    compose_cmd -p "$APP_NAME" stop $services 2>/dev/null || true
 }
 
 # Start application services defined in docker-compose.yml and propagate Compose exit status.
@@ -934,7 +938,7 @@ start_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
     [ -z "$services" ] && services="pasarguard"
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null
+    compose_cmd -p "$APP_NAME" start $services 2>/dev/null
 }
 
 
@@ -950,23 +954,23 @@ find_container() {
 
     case $db_type in
     mariadb)
-        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1 || true)
+        container_name=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$(compose_cmd -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name="mariadb"
         ;;
     mysql)
-        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mysql mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
+        container_name=$(compose_cmd -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$(compose_cmd -p "$APP_NAME" ps --format json mysql mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name="mysql"
         ;;
     postgresql|timescaledb)
-        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
-        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
+        container_name=$(compose_cmd -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$(compose_cmd -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$(compose_cmd -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
         [ -z "$container_name" ] && container_name="${APP_NAME}-timescaledb-1"
         ;;
     esac
@@ -991,17 +995,17 @@ check_container() {
     else
         case $db_type in
         mariadb)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mariadb-1"
             ;;
         mysql)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mysql-1"
             ;;
         postgresql|timescaledb)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$(compose_cmd -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-postgresql-1"
             ;;
         esac
@@ -1035,17 +1039,17 @@ verify_and_start_container() {
     else
         case $db_type in
         mariadb)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mariadb-1"
             ;;
         mysql)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$(compose_cmd -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mysql-1"
             ;;
         postgresql|timescaledb)
-            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+            actual_container=$(compose_cmd -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$(compose_cmd -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
             [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-postgresql-1"
             ;;
         esac
@@ -1062,7 +1066,7 @@ verify_and_start_container() {
     if [ "$container_running" = false ]; then
         colorized_echo yellow "Database container '$container_name' is not running. Attempting to start it..."
         docker start "$container_name" >/dev/null 2>&1 || \
-        $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start "${db_type%%|*}" 2>/dev/null || true
+        compose_cmd -p "$APP_NAME" start "${db_type%%|*}" 2>/dev/null || true
         sleep 2
         docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . && container_running=true || \
         docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . && container_running=true
@@ -1239,6 +1243,7 @@ install_pasarguard() {
     fi
     set_pasarguard_panel_image "$target_image"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
+    compose_override_notice
 
     colorized_echo green "pasarguard installed successfully"
 }
@@ -1271,7 +1276,7 @@ status_command() {
     echo -n "Status: "
     colorized_echo green "Up"
 
-    json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
+    json=$(compose_cmd ps -a --format=json)
     services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
     states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
     # Print out the service names and statuses
@@ -1732,7 +1737,7 @@ pasarguard_cli() {
         colorized_echo red "Could not detect PasarGuard backend service in docker-compose."
         return 1
     fi
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" "$backend_service" pasarguard-cli "$@"
+    compose_cmd -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" "$backend_service" pasarguard-cli "$@"
 }
 
 # Launch the PasarGuard interactive Terminal User Interface (TUI).
@@ -1745,7 +1750,7 @@ pasarguard_tui() {
         colorized_echo red "Could not detect PasarGuard backend service in docker-compose."
         return 1
     fi
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e TUI_PROG_NAME="pasarguard tui" "$backend_service" pasarguard-tui "$@"
+    compose_cmd -p "$APP_NAME" exec -e TUI_PROG_NAME="pasarguard tui" "$backend_service" pasarguard-tui "$@"
 }
 
 
@@ -1753,7 +1758,7 @@ pasarguard_tui() {
 # Returns:
 #   0 if containers exist, 1 otherwise.
 is_pasarguard_up() {
-    if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
+    if [ -z "$(compose_cmd ps -q -a)" ]; then
         return 1
     else
         return 0
@@ -2125,7 +2130,7 @@ update_pasarguard_script() {
 
 # Pull the latest Docker images specified in docker-compose.yml.
 update_pasarguard() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
+    compose_cmd -p "$APP_NAME" pull
 }
 
 # Open the docker-compose.yml file in the configured text editor.
