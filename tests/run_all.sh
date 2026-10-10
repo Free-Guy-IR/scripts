@@ -17,6 +17,7 @@ SUITES=(
     "test_node_service_readiness_tls.sh"
     "unit_pgnode_service.sh"
     "unit_restore_archive_safety.sh"
+    "unit_restore_recovery.sh"
     "test_script_update_safety.sh"
 )
 
