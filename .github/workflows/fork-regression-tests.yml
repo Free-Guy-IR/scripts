@@ -59,6 +59,9 @@ jobs:
       - name: Services running the fork's panel image are panel services
         run: bash tests/run_isolated.sh tests/test_fork_panel_image_detection.sh
 
+      - name: Every Compose call loads the override that Compose itself would load
+        run: bash tests/run_isolated.sh tests/test_compose_override_honoured.sh
+
       - name: The node-serviced unit is written with mode 644
         run: bash tests/run_isolated.sh tests/test_node_service_unit_mode.sh
 
