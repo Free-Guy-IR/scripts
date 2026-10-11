@@ -148,6 +148,27 @@ What e190d3d changes:
   - `tests/unit_pgnode.sh` runs with `pipefail`, which is why "port 80 is busy" failed now and then.
   - The scripts themselves do not set `pipefail`, so installs were not affected.
 
+## Compose override files (specs/001-compose-file-contract)
+
+Upstream passes only `-f docker-compose.yml` to Compose, so `docker-compose.override.yml` is never read, and a
+`restart`, `update`, `up` or `down` recreates the containers from the base file. On a host whose override pins
+the panel or node image, that silently rolls the image back.
+
+- `lib/docker.sh` adds `compose_override_file`, `compose_cmd` and `compose_override_notice`. `compose_cmd` passes
+  the base file and then the override Compose itself would load next to it: the first existing regular file of
+  `compose.override.yml`, `compose.override.yaml`, `docker-compose.override.yml`, `docker-compose.override.yaml`.
+  `compose_up`, `compose_down`, `compose_logs` and `compose_logs_follow` keep their names and go through it.
+- Every `$COMPOSE -f "$COMPOSE_FILE"` call in `pasarguard.sh` and `pg-node.sh` goes through `compose_cmd`. Both
+  scripts stop when the loaded `docker.sh` lacks it. The installers, including the two standalone wrappers, say
+  when an override is loaded.
+- `lib/pasarguard-restore.sh`: a non-SQLite restore, ordinary or `--fresh`, keeps the destination's Compose files
+  and now also its override files. The app-directory sync excludes the four override names, so the source host's
+  pins never take effect on the destination, and the restore says when the backup held one. Upstream installs
+  the archive's override, which a manual `docker compose up` in the app directory then loads.
+- The upstream-identical `lib/pasarguard-backup.sh` is unchanged. Its own Compose calls only list services and
+  containers.
+- Tests: `tests/test_compose_override_honoured.sh`, `tests/test_restore_keeps_destination_override.sh`.
+
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 
 **Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 5f61243.

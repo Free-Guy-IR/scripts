@@ -2236,12 +2236,23 @@ restore_command() {
                 cleanup_and_exit_restore_error 1
             fi
         fi
+        local -a destination_override_excludes=()
+        local archived_override=""
+        if [[ "$db_type" != "sqlite" ]]; then
+            for archived_override in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml; do
+                destination_override_excludes+=(--exclude "/$archived_override")
+                if [ -e "$temp_restore_dir/$archived_override" ]; then
+                    colorized_echo yellow "The backup holds $archived_override. It was not installed: the destination keeps its own Compose files."
+                fi
+            done
+        fi
         if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
             --exclude 'db_backup.timescaledb-version' --exclude 'pg_dump' \
             --exclude 'backup-runtime.tsv' --exclude 'backup-files.sha256' --exclude '.pasarguard-recovery-compose.json' \
             --exclude '.pasarguard-destination-compose.yml' --exclude 'pasarguard_ts_compat.*' \
             --exclude '*_combined.zip' --exclude 'pasarguard_env_cleaned' \
             --exclude 'pasarguard_restore_error.log' --exclude "$sqlite_basename" \
+            ${destination_override_excludes[@]+"${destination_override_excludes[@]}"} \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
             colorized_echo red "Failed to restore app directory files."
             echo "Failed to restore app directory files from $temp_restore_dir to $APP_DIR" >>"$log_file"

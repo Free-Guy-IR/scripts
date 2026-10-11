@@ -28,7 +28,8 @@
 
 ## Phase 6: Polish
 
-- [ ] T008 [P] Run tests/test_compose_override_honoured.sh in .github/workflows/fork-regression-tests.yml
+- [ ] T007a [US4] FR-009: tests/test_restore_keeps_destination_override.sh (RED), then exclude the four override names from the ordinary non-SQLite restore's app-directory sync in lib/pasarguard-restore.sh and say when the backup held one
+- [ ] T008 [P] Run tests/test_compose_override_honoured.sh and tests/test_restore_keeps_destination_override.sh in .github/workflows/fork-regression-tests.yml
 - [ ] T009 [P] Record the lib/docker.sh and call-site divergence in parity/DIVERGENCES.md
 - [ ] T010 shellcheck every changed shell file; run tests/run_all.sh and every tests/test_*.sh through tests/run_isolated.sh
 - [ ] T011 An independent verifier re-runs the RED test on the parent and on the final head
