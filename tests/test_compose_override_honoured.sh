@@ -287,8 +287,8 @@ check_equal "an older script gets the override from compose_down" "${OLD_PREFIX}
 check_equal "an older script gets the override from compose_logs" "${OLD_PREFIX}$(joined logs)" "$(sed -n 3p "$COMPOSE_CALL_RECORD")"
 check_equal "an older script gets the override from compose_logs_follow" "${OLD_PREFIX}$(joined logs -f)" "$(sed -n 4p "$COMPOSE_CALL_RECORD")"
 
-STALE_ROOT="$WORK_DIR/stale-lib"
-mkdir -p "$STALE_ROOT"
+mkdir -p "$WORK_DIR/stale-lib"
+STALE_ROOT="$(cd -- "$WORK_DIR/stale-lib" && pwd)"
 cp -R "$SCRIPTS_ROOT/lib" "$STALE_ROOT/lib"
 cp "$SCRIPTS_ROOT/pasarguard.sh" "$SCRIPTS_ROOT/pg-node.sh" "$STALE_ROOT/"
 printf '\nunset -f compose_cmd\n' >>"$STALE_ROOT/lib/docker.sh"
