@@ -92,5 +92,17 @@ if console "PAUSE;" >"$WORK_DIR/pause.log" 2>&1; then
 else
     pass "the panel's database user cannot PAUSE or SHUTDOWN PgBouncer"
 fi
+if console "RELOAD;" >"$WORK_DIR/reload.log" 2>&1; then
+    fail "the panel's database user can RELOAD PgBouncer through its admin console"
+else
+    pass "the panel's database user cannot RELOAD PgBouncer"
+fi
+if console "SHUTDOWN;" >"$WORK_DIR/shutdown.log" 2>&1; then
+    fail "the panel's database user can SHUTDOWN PgBouncer through its admin console"
+elif console "SHOW POOLS;" >/dev/null 2>&1; then
+    pass "the panel's database user cannot SHUTDOWN PgBouncer, which still answers"
+else
+    fail "PgBouncer stopped answering after the panel's database user sent SHUTDOWN"
+fi
 
 [ "$FAILURES" -eq 0 ]

@@ -65,6 +65,9 @@ jobs:
       - name: A restore keeps the destination's Compose override and never installs the archive's
         run: bash tests/run_isolated.sh tests/test_restore_keeps_destination_override.sh
 
+      - name: The panel's database user is a PgBouncer stats user, never an admin
+        run: bash tests/run_isolated.sh tests/test_pgbouncer_console_read_only.sh
+
       - name: The node-serviced unit is written with mode 644
         run: bash tests/run_isolated.sh tests/test_node_service_unit_mode.sh
 
