@@ -175,11 +175,16 @@ the panel or node image, that silently rolls the image back.
 
 **What it does:** PostgreSQL and TimescaleDB installs connect through PgBouncer in transaction mode, which breaks the
 panel's asyncpg prepared statements on PgBouncer before 1.24. The port writes the panel URL with
-`prepared_statement_cache_size=0`, and gives PgBouncer `MAX_PREPARED_STATEMENTS`, `IGNORE_STARTUP_PARAMETERS` and
-`ADMIN_USERS` plus a `pg_isready` health check.
+`prepared_statement_cache_size=0`, and gives PgBouncer `MAX_PREPARED_STATEMENTS` and `IGNORE_STARTUP_PARAMETERS`
+plus a `pg_isready` health check.
 
-**How the fork's copy differs from the pull request:** the fork does not take its `postgres:latest` to
-`postgres:17-alpine` pin. The pin is unrelated to #882, and fork installs made so far run `postgres:latest` (18) on the
+**How the fork's copy differs from the pull request:**
+
+- The pull request makes the panel's database user a PgBouncer `ADMIN_USERS` member, which lets the panel's
+  credentials PAUSE or SHUTDOWN the pooler through its console. Nothing needs that. The fork sets `STATS_USERS`
+  instead, so the panel user can read `SHOW POOLS` and nothing more. `tests/docker/pgbouncer_compose_health.sh`
+  checks both.
+- The fork does not take its `postgres:latest` to `postgres:17-alpine` pin. The pin is unrelated to #882, and fork installs made so far run `postgres:latest` (18) on the
 same `/var/lib/postgresql` mount, so a new install on 17 would have to restore dumps taken by 18.
 
 **Test:** `tests/docker/pgbouncer_prepared_statements.sh`, run by `.github/workflows/pgbouncer-prepared-statements.yml`
