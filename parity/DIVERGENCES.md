@@ -1,6 +1,6 @@
 # Where this fork differs from PasarGuard/scripts
 
-Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `7bccaec` (2026-10-09, #34).
+Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `bba95f2` (2026-10-10, #35, #36 and #37).
 
 `parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: other branches, release
 tags, and open pull requests. Each decision is pinned to that item's current SHA.
