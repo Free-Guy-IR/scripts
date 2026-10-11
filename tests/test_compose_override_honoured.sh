@@ -34,6 +34,7 @@ if [ "${1:-}" = compose ] && [ "${2:-}" = version ]; then
     echo "Docker Compose version v2.99.0"
     exit 0
 fi
+[ "${1:-}" = compose ] || exit 0
 {
     printf '%s\037' "$@"
     printf '\n'
@@ -153,6 +154,10 @@ run_pasarguard_paths() {
         (pasarguard_cli admin list) >/dev/null 2>&1
         (show_pasarguard_logs) >/dev/null 2>&1
         (status_command) >/dev/null 2>&1
+        (find_container mysql) >/dev/null 2>&1
+        (find_container postgresql) >/dev/null 2>&1
+        (check_container mysql) >/dev/null 2>&1
+        (pasarguard_tui) >/dev/null 2>&1
         exit 0
     )
 }
@@ -169,6 +174,7 @@ run_pgnode_paths() {
         (update_node) >/dev/null 2>&1
         (is_node_up) >/dev/null 2>&1
         (show_node_logs) >/dev/null 2>&1
+        (status_command) >/dev/null 2>&1
         exit 0
     )
 }
@@ -332,6 +338,22 @@ for pair in "pasarguard.sh install_pasarguard" "pg-node.sh install_node" \
         fail "$file $func prints the override notice after writing the base file"
     fi
 done
+
+direct_calls="$(grep -nE '[$][{]?COMPOSE[}]?[[:space:]]' "$SCRIPTS_ROOT/pasarguard.sh" "$SCRIPTS_ROOT/pg-node.sh" \
+    "$SCRIPTS_ROOT/pg-node-service.sh" "$SCRIPTS_ROOT"/iran-sanction/*.sh "$SCRIPTS_ROOT/lib/common.sh" \
+    "$SCRIPTS_ROOT/lib/system.sh" "$SCRIPTS_ROOT/lib/env.sh" "$SCRIPTS_ROOT/lib/github.sh" 2>/dev/null)"
+if [ -z "$direct_calls" ]; then
+    pass "no script runs Compose except through compose_cmd"
+else
+    fail "no script runs Compose except through compose_cmd: $(tr '\n' ' ' <<<"$direct_calls")"
+fi
+docker_lib_calls="$(grep -cE '[$][{]?COMPOSE[}]?[[:space:]]' "$SCRIPTS_ROOT/lib/docker.sh")"
+compose_cmd_body="$(awk '/^compose_cmd\(\) \{/ { inside = 1 } inside { print } inside && /^}/ { exit }' "$SCRIPTS_ROOT/lib/docker.sh" | grep -cE '[$][{]?COMPOSE[}]?[[:space:]]')"
+if [ "$docker_lib_calls" -gt 0 ] && [ "$docker_lib_calls" = "$compose_cmd_body" ]; then
+    pass "lib/docker.sh runs Compose only inside compose_cmd ($docker_lib_calls calls)"
+else
+    fail "lib/docker.sh runs Compose only inside compose_cmd ($docker_lib_calls in the file, $compose_cmd_body in compose_cmd)"
+fi
 
 if [ "$REAL_COMPOSE_KIND" = none ]; then
     printf 'NOTE: Compose resolution checks were skipped; no docker compose and no DOCKER_COMPOSE_BIN.\n'
