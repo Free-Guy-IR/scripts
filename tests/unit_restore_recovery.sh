@@ -54,7 +54,13 @@ case "$1" in
                 exit "$code"
                 ;;
             *" mariadb --version"*) exit "$(cat "$d/has_mariadb")" ;;
-            *) cat "$d/target_version" ;;
+            *)
+                # With accept_pwd set, only a client call carrying that password works.
+                if [ -s "$d/accept_pwd" ]; then
+                    case " $* " in *" MYSQL_PWD=$(cat "$d/accept_pwd") "* | *" PGPASSWORD=$(cat "$d/accept_pwd") "*) ;; *) exit 1 ;; esac
+                fi
+                cat "$d/target_version"
+                ;;
         esac
         ;;
     *) exit 1 ;;
@@ -99,6 +105,8 @@ fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 assert_true() { local l="$1"; shift; if "$@"; then pass "$l"; else fail "$l"; fi; }
 # Assert that the given command evaluates to false (nonzero exit status).
 assert_false() { local l="$1"; shift; if ! "$@"; then pass "$l"; else fail "$l"; fi; }
+# True when a pre-restore safety copy of APP_DIR or DATA_DIR exists.
+has_safety_copies() { compgen -G "$APP_DIR.backup.*" >/dev/null || compgen -G "$DATA_DIR.backup.*" >/dev/null; }
 # Run a command with its output discarded.
 quiet() { "$@" >/dev/null 2>&1; }
 # Assert equality between actual and expected values.
@@ -252,9 +260,61 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
     out=$(run_restore "$WORK_DIR/archives/edited.zip" --check 2>&1)
     assert_eq "$?" 1 "restore --check: edited payload rejected"
 
+    # An ordinary restore never switches the destination's database engine.
+    make_sqlite_archive cross keep
+    mkdir -p "$APP_DIR" "$DATA_DIR"
+    printf 'DB_USER=pg\nDB_PASSWORD=pgpass\nDB_NAME=panel\nSQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pg:pgpass@127.0.0.1:5432/panel"\n' >"$ENV_FILE"
+    printf 'services:\n  pasarguard:\n    image: pasarguard/panel:latest\n  postgresql:\n    image: postgres:16\n' >"$COMPOSE_FILE"
+    cp "$ENV_FILE" "$WORK_DIR/env.before"
+    cp "$COMPOSE_FILE" "$WORK_DIR/compose.before"
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/cross.zip" --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 1 "restore: SQLite backup onto a PostgreSQL installation refused"
+    case "$out" in *"Backup engine (sqlite) differs from destination (postgresql)"*) pass "restore: engine mismatch explained" ;; *) fail "restore: engine mismatch explained" ;; esac
+    assert_true "restore: engine mismatch leaves .env unchanged" cmp -s "$ENV_FILE" "$WORK_DIR/env.before"
+    assert_true "restore: engine mismatch leaves docker-compose.yml unchanged" cmp -s "$COMPOSE_FILE" "$WORK_DIR/compose.before"
+    assert_false "restore: engine mismatch stops no services" grep -qE ' (stop|down)( |$)' "$FAKE_DOCKER_DIR/calls.log"
+    rm -rf "$APP_DIR" "$DATA_DIR"
+
     make_sqlite_archive noinventory drop
     out=$(run_restore "$WORK_DIR/archives/noinventory.zip" --check 2>&1)
     assert_eq "$?" 1 "restore --check: recovery metadata without inventory rejected"
+
+    # A --fresh run that stopped after provisioning is continued by the same command.
+    ensure_docker_service_running() { :; }
+    make_sqlite_archive resume keep
+    mkdir -p "$APP_DIR" "$DATA_DIR"
+    unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" backup-files.sha256 | sha256sum | awk '{print $1}' >"$APP_DIR/.pasarguard-fresh-restore"
+    printf 'half provisioned\n' >"$DATA_DIR/leftover"
+    rm -rf "$APP_DIR".backup.* "$DATA_DIR".backup.*
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/resume.zip" --fresh --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 0 "fresh retry: same command continues the unfinished run"
+    assert_false "fresh retry: no safety copies of the half-provisioned install" has_safety_copies
+    case "$out" in *"Continuing it as an ordinary restore"*) pass "fresh retry: continuation announced" ;; *) fail "fresh retry: continuation announced" ;; esac
+    assert_true "fresh retry: database restored" test -s "$DATA_DIR/db.sqlite3"
+    assert_true "fresh retry: data restored" test -f "$DATA_DIR/cert.pem"
+    assert_false "fresh retry: marker removed after success" test -e "$APP_DIR/.pasarguard-fresh-restore"
+    assert_true "fresh retry: services started at the end" grep -q ' up -d' "$FAKE_DOCKER_DIR/calls.log"
+
+    # The marker of another backup is not continued.
+    rm -rf "$APP_DIR" "$DATA_DIR"
+    mkdir -p "$APP_DIR"
+    unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
+    printf '%s\n' "$(printf '0%.0s' {1..64})" >"$APP_DIR/.pasarguard-fresh-restore"
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/resume.zip" --fresh --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 1 "fresh retry: marker from another backup refused"
+    case "$out" in *"used a different backup"*) pass "fresh retry: other backup explained" ;; *) fail "fresh retry: other backup explained" ;; esac
+    assert_false "fresh retry: refused retry stops no services" grep -qE ' (stop|down)( |$)' "$FAKE_DOCKER_DIR/calls.log"
+    assert_false "fresh retry: refused retry restores no data" test -e "$DATA_DIR/cert.pem"
+    rm -rf "$APP_DIR" "$DATA_DIR"
     rm -rf "$WORK_DIR/archives" "$WORK_DIR/edit" "$APP_DIR" "$DATA_DIR"
 else
     echo "(skipped restore --check cases: sqlite3/zip/unzip unavailable)"
@@ -292,12 +352,66 @@ assert_false "version guard: MariaDB backup into MySQL rejected" version_guard "
 assert_true "version guard: MariaDB 11.4 backup into 11.8 allowed" version_guard "11.4.2-MariaDB" "11.8.1-MariaDB" mariadb
 printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
 : >"$FAKE_DOCKER_DIR/calls.log"
+# The probe tries the credentials the import tries: current root, backup root,
+# backup app user, current app user.
+echo 1 >"$FAKE_DOCKER_DIR/has_mariadb"
+# shellcheck disable=SC2034 # read by check_restore_database_version
+MYSQL_ROOT_PASSWORD="backup-root-pass"
+for accepted in root-pass backup-root-pass app-pass; do
+    printf '%s' "$accepted" >"$FAKE_DOCKER_DIR/accept_pwd"
+    assert_true "version guard: MySQL probe works with credential '$accepted'" version_guard "8.0.39" "8.4.3" mysql
+done
+printf 'app-pass' >"$FAKE_DOCKER_DIR/accept_pwd"
+: >"$FAKE_DOCKER_DIR/calls.log"
+version_guard "8.0.39" "8.4.3" mysql
+tried=$(grep -o 'MYSQL_PWD=[^ ]*' "$FAKE_DOCKER_DIR/calls.log" | paste -sd ' ')
+assert_eq "$tried" "MYSQL_PWD=root-pass MYSQL_PWD=backup-root-pass MYSQL_PWD=app-pass" "version guard: credentials tried in the import's order"
+printf 'nothing-matches' >"$FAKE_DOCKER_DIR/accept_pwd"
+printf 'format\t1\nserver_version\t8.0.39\n' >"$stage/backup-runtime.tsv"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 2 "version guard: unreadable destination version returns 2"
+: >"$FAKE_DOCKER_DIR/accept_pwd"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 0 "version guard: compatible destination returns 0"
+printf '8.0.1\n' >"$FAKE_DOCKER_DIR/target_version"
+printf 'format\t1\nserver_version\t8.4.3\n' >"$stage/backup-runtime.tsv"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 1 "version guard: refused downgrade returns 1"
+unset MYSQL_ROOT_PASSWORD
+printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
+: >"$FAKE_DOCKER_DIR/calls.log"
 assert_true "version guard: unknown source version is not guessed" check_restore_database_version "$stage" postgresql cid-db "$WORK_DIR/version.log"
 assert_eq "$(wc -l <"$FAKE_DOCKER_DIR/calls.log")" 0 "version guard: unknown source version makes no docker calls"
 printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
 printf -- '-- Dumped from database version 17.2\n' >"$stage/db_backup.sql"
 assert_false "version guard: dump header version used when metadata is unknown" version_guard unknown "16.4" postgresql
 rm -f "$stage/db_backup.sql"
+
+# -----------------------------------------------------------------------
+# Data directory: shared excludes and the pre-restore safety copy
+# -----------------------------------------------------------------------
+rm -rf "$DATA_DIR" "$WORK_DIR/extracted"
+mkdir -p "$DATA_DIR/xray-core" "$DATA_DIR/mysql" "$DATA_DIR/certs/mysql" "$WORK_DIR/extracted/certs"
+printf 'binary\n' >"$DATA_DIR/xray-core/xray"
+printf 'ibdata\n' >"$DATA_DIR/mysql/ibdata1"
+printf 'old\n' >"$DATA_DIR/certs/mysql/ca.pem"
+printf 'stale\n' >"$DATA_DIR/stale.txt"
+printf 'restored\n' >"$WORK_DIR/extracted/certs/cert.pem"
+rsync -a --delete "${PASARGUARD_DATA_DIR_EXCLUDES[@]}" "$WORK_DIR/extracted/" "$DATA_DIR/"
+assert_true "data sync: Xray binaries kept" test -f "$DATA_DIR/xray-core/xray"
+assert_true "data sync: top-level database storage kept" test -f "$DATA_DIR/mysql/ibdata1"
+assert_false "data sync: nested directory named mysql is part of the data" test -e "$DATA_DIR/certs/mysql"
+assert_false "data sync: files missing from the backup are removed" test -e "$DATA_DIR/stale.txt"
+assert_true "data sync: backed-up files restored" test -f "$DATA_DIR/certs/cert.pem"
+
+printf 'old\n' >"$DATA_DIR/certs/mysql-ca.pem"
+assert_true "data safety copy: succeeds" save_data_dir_safety_copy "$WORK_DIR/data.copy" "$WORK_DIR/copy.log"
+assert_true "data safety copy: data files copied" test -f "$WORK_DIR/data.copy/certs/mysql-ca.pem"
+assert_false "data safety copy: database storage not copied" test -e "$WORK_DIR/data.copy/mysql"
+assert_false "data safety copy: Xray binaries not copied" test -e "$WORK_DIR/data.copy/xray-core"
+printf 'not a directory\n' >"$WORK_DIR/blocker"
+assert_false "data safety copy: failure is reported" save_data_dir_safety_copy "$WORK_DIR/blocker/copy" "$WORK_DIR/copy.log"
+rm -rf "$DATA_DIR" "$WORK_DIR/extracted" "$WORK_DIR/data.copy" "$WORK_DIR/blocker"
 
 # -----------------------------------------------------------------------
 # wait_for_recovery_database (docker and sleep mocked)
@@ -363,6 +477,7 @@ make_fresh_stage() {
         '{services: ({pasarguard: {image: $panel, volumes: [{type: "bind", source: $data, target: "/var/lib/pasarguard"}]},
                       postgresql: {image: "postgres:16"}} + (if $worker == "" then {} else {worker: {image: $panel}} end)),
           volumes: {}}' >"$FAKE_DOCKER_DIR/config.json"
+    write_backup_checksums "$stage"
 }
 
 reset_fake_docker
@@ -385,6 +500,7 @@ assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "install_yq" "fresh: yq not insta
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps postgresql" "fresh: only the database started"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: database container from Compose returned to the caller"
 assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh: .env installed 0600"
+assert_eq "$(cat "$APP_DIR/.pasarguard-fresh-restore" 2>/dev/null)" "$(sha256sum <"$stage/backup-files.sha256" | awk '{print $1}')" "fresh: provisioned installation marked with the backup's inventory hash"
 
 # Offline: no registry digest was recorded, the original image ID is loaded.
 reset_fake_docker
@@ -415,6 +531,7 @@ prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_co
 assert_eq "$?" 1 "fresh: unreproducible image refused"
 assert_file_has "$WORK_DIR/fresh.out" "No reproducible image for service 'pasarguard'" "fresh: refusal names the service"
 assert_false "fresh: refusal installs no .env" test -e "$ENV_FILE"
+assert_false "fresh: refusal leaves no retry marker" test -e "$APP_DIR/.pasarguard-fresh-restore"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "tag " "fresh: refusal tags nothing"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" " up " "fresh: refusal starts nothing"
 
@@ -486,6 +603,16 @@ fresh_db_container=""
 prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
 assert_eq "$?" 0 "fresh: database without healthcheck accepted once it answers"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: probed database container returned to the caller"
+
+# -----------------------------------------------------------------------
+# install_pasarguard drops a retry marker left by an unfinished --fresh
+# -----------------------------------------------------------------------
+rm -rf "$APP_DIR" "$DATA_DIR"
+mkdir -p "$APP_DIR"
+printf '%s\n' "$(printf '0%.0s' {1..64})" >"$APP_DIR/.pasarguard-fresh-restore"
+(install_pasarguard latest 1 sqlite) >/dev/null 2>&1
+assert_false "install: retry marker from an unfinished --fresh removed" test -e "$APP_DIR/.pasarguard-fresh-restore"
+rm -rf "$APP_DIR" "$DATA_DIR"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
