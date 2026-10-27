@@ -3,7 +3,9 @@
 Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `bba95f2` (2026-10-10, #35, #36 and #37).
 
 `parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: other branches, release
-tags, and open pull requests. Each decision is pinned to that item's current SHA.
+tags, and open pull requests. Each decision is pinned to that item's current SHA. A `deferred` decision must
+end its reason with `until:YYYY-MM-DD`, at most 30 days ahead; the check fails once that date has passed, so a
+deferral is decided again at least every 30 days instead of keeping the check green forever.
 
 `.github/workflows/upstream-parity.yml` runs `tools/check-upstream-parity.sh` daily and on every push. The check
 fails when upstream has a commit, branch, release tag or open pull request that is neither in the fork's history

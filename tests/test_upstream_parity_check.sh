@@ -29,6 +29,7 @@ refresh() {
 
 LEDGER="$WORK_DIR/ledger.tsv"
 OPEN_PRS="$WORK_DIR/open-prs.txt"
+export PARITY_TODAY=2026-11-01
 
 run_check() {
     (cd "$FORK" && UPSTREAM_REMOTE=upstream PARITY_LEDGER="$LEDGER" PARITY_EXPECTED_UPSTREAM="$UPSTREAM" PARITY_ALLOW_NO_OPEN_PRS=true OPEN_PRS_FILE="$OPEN_PRS" bash "$CHECKER") >"$WORK_DIR/out" 2>&1
@@ -79,7 +80,7 @@ expect pass "re-deciding the moved branch passes"
 
 printf '101\t0123456789abcdef0123456789abcdef01234567\n' >"$OPEN_PRS"
 expect fail "an open upstream pull request without a decision fails the check"
-printf 'pr\t101\t0123456789abcdef0123456789abcdef01234567\tdeferred\twaiting for upstream review\n' >>"$LEDGER"
+printf 'pr\t101\t0123456789abcdef0123456789abcdef01234567\tdeferred\twaiting for upstream review until:2026-11-15\n' >>"$LEDGER"
 expect pass "an open pull request decided at its current head passes"
 printf '101\tfedcba9876543210fedcba9876543210fedcba98\n' >"$OPEN_PRS"
 expect fail "a decided pull request that got new commits fails until it is decided again"
@@ -98,6 +99,45 @@ printf 'branch\tghost\t0123456789abcdef0123456789abcdef01234567\tbogus\t\n' >>"$
 expect fail "a ledger row with an unknown decision or no detail fails the check"
 sed -i.bak '/ghost/d' "$LEDGER" && rm -f "$LEDGER.bak"
 expect pass "the ledger is valid again"
+
+set_parked() {
+    sed -i.bak '/parked/d' "$LEDGER" && rm -f "$LEDGER.bak"
+    printf 'branch\tparked\t0123456789abcdef0123456789abcdef01234567\tdeferred\t%s\n' "$1" >>"$LEDGER"
+}
+set_parked "port in progress"
+expect fail "a deferred row without an until date fails the check"
+if grep -q 'until:YYYY-MM-DD' "$WORK_DIR/out"; then pass "the failure says a deferred row needs until:YYYY-MM-DD"; else fail "the failure does not say a deferred row needs until:YYYY-MM-DD"; fi
+set_parked "port in progress until:soon"
+expect fail "a deferred row with an unreadable until date fails the check"
+set_parked "port in progress until:2026-02-30"
+expect fail "a deferred row with an impossible until date fails the check"
+set_parked "port in progress until:2026-13-01"
+expect fail "a deferred row with an impossible until month fails the check"
+set_parked "port in progress until:2026-11-01"
+expect pass "a deferral that runs until today passes"
+set_parked "port in progress until:2026-10-31"
+expect fail "a deferral whose until date has passed fails the check"
+if grep -q 'expired after 2026-10-31' "$WORK_DIR/out"; then pass "the failure names the last day the deferral covered"; else fail "the failure does not name the last day the deferral covered"; fi
+set_parked "port in progress until:2026-12-01"
+expect pass "a deferral exactly 30 days ahead passes"
+set_parked "port in progress until:2026-12-02"
+expect fail "a deferral more than 30 days ahead fails the check"
+set_parked "hold until:2026-11-10 pending review"
+expect fail "a deferred row with text after the until date fails the check"
+if grep -q 'must end with until:' "$WORK_DIR/out"; then pass "the failure says the reason must end with until:YYYY-MM-DD"; else fail "the failure does not say the reason must end with until:YYYY-MM-DD"; fi
+set_parked "until:2026-11-10 is at the start"
+expect fail "a deferred row whose until date is not last fails the check"
+set_parked "glued until:2099-01-01until:2026-11-10"
+expect fail "a deferred row whose last token glues two until dates fails the check"
+set_parked "port in progress until:2026-11-10 until:2026-10-01"
+expect fail "a deferred row with two until dates fails the check"
+if grep -q 'more than one until:' "$WORK_DIR/out"; then pass "the failure says the row has more than one until date"; else fail "the failure does not say the row has more than one until date"; fi
+set_parked "port in progress until:2026-11-10 then until:2099-01-01"
+expect fail "a second, later until date cannot extend a deferral"
+set_parked "port in progress until:2026-11-20"
+PARITY_TODAY=tomorrow expect fail "a malformed PARITY_TODAY fails instead of skipping the date check"
+sed -i.bak '/parked/d' "$LEDGER" && rm -f "$LEDGER.bak"
+expect pass "the ledger is valid again after the deferral cases"
 
 git_in "$UPSTREAM" commit -q --allow-empty -m "fix: landed after the last fetch"
 expect fail "a stale local copy of upstream main fails instead of passing on old refs"
@@ -168,7 +208,7 @@ run_api_check() {
 run_api_check one-pr
 if [ $? -ne 0 ] && grep -q '#7' "$WORK_DIR/out"; then pass "without OPEN_PRS_FILE the check lists open pull requests itself and fails on an undecided one"; else fail "without OPEN_PRS_FILE the check did not list the open pull requests itself"; fi
 if grep -q 'api.github.com/repos/Example/upstream/pulls?state=open' "$STUB_LOG"; then pass "the check asks the GitHub API of the upstream repository"; else fail "the check did not ask the GitHub API of the upstream repository"; fi
-printf 'pr\t7\t1111111111111111111111111111111111111111\tdeferred\twaiting for upstream review\n' >>"$LEDGER"
+printf 'pr\t7\t1111111111111111111111111111111111111111\tdeferred\twaiting for upstream review until:2026-11-15\n' >>"$LEDGER"
 run_api_check one-pr
 if [ $? -eq 0 ] && grep -q 'fetched from the GitHub API' "$WORK_DIR/out"; then pass "a decided pull request listed by the API passes and the output says where the list came from"; else fail "a decided pull request listed by the API did not pass, or the output hides where the list came from"; fi
 run_api_check down

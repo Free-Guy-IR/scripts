@@ -9,11 +9,62 @@ expected_upstream="${PARITY_EXPECTED_UPSTREAM:-github.com/PasarGuard/scripts}"
 allow_no_open_prs="${PARITY_ALLOW_NO_OPEN_PRS:-false}"
 open_prs_source=""
 fork_ref="${FORK_REF:-HEAD}"
+today="${PARITY_TODAY:-$(date -u +%Y-%m-%d)}"
+max_defer_days=30
 problems=0
 
 report() {
     printf 'PARITY: %s\n' "$1"
     problems=$((problems + 1))
+}
+
+civil_days() {
+    local y m d era yoe doy
+    local month_days=(31 28 31 30 31 30 31 31 30 31 30 31)
+    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then
+        month_days[1]=29
+    fi
+    [ "$m" -ge 1 ] && [ "$m" -le 12 ] && [ "$d" -ge 1 ] && [ "$d" -le "${month_days[m - 1]}" ] || return 1
+    if [ "$m" -le 2 ]; then
+        y=$((y - 1))
+        doy=$(((153 * (m + 9) + 2) / 5 + d - 1))
+    else
+        doy=$(((153 * (m - 3) + 2) / 5 + d - 1))
+    fi
+    era=$((y / 400))
+    yoe=$((y - era * 400))
+    printf '%s\n' $((era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy))
+}
+
+check_deferral() {
+    local kind="$1" name="$2" detail="$3" until_date until_days until_tokens
+    until_tokens="$(grep -oE '(^|[[:space:]])until:[^[:space:]]*' <<<"$detail")"
+    if [ "$(grep -c . <<<"$until_tokens")" -gt 1 ]; then
+        report "ledger row '$kind $name' has more than one until: date; keep exactly one"
+        return
+    fi
+    local trimmed last_token
+    trimmed="${detail%"${detail##*[![:space:]]}"}"
+    last_token="${trimmed##*[[:space:]]}"
+    if ! [[ "$last_token" =~ ^until:[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        report "ledger row '$kind $name' must end with until:YYYY-MM-DD and nothing after it; a deferral ends within $max_defer_days days"
+        return
+    fi
+    until_date="${last_token#until:}"
+    if ! until_days="$(civil_days "$until_date")"; then
+        report "ledger row '$kind $name' has an unreadable until date '$until_date'; write until:YYYY-MM-DD"
+        return
+    fi
+    [ -n "$today_days" ] || return
+    if [ "$until_days" -lt "$today_days" ]; then
+        report "ledger row '$kind $name' was deferred until $until_date and expired after $until_date; port it, waive it, or defer it again with a new date"
+    elif [ $((until_days - today_days)) -gt "$max_defer_days" ]; then
+        report "ledger row '$kind $name' is deferred until $until_date, more than $max_defer_days days after $today"
+    fi
 }
 
 ledger_decision() {
@@ -173,6 +224,12 @@ if [ "$stale_refs" -ne 0 ]; then
     exit 1
 fi
 
+today_days=""
+if ! today_days="$(civil_days "$today")"; then
+    report "PARITY_TODAY '$today' is not a valid YYYY-MM-DD date, so no deferral can be checked"
+    today_days=""
+fi
+
 while IFS=$'\t' read -r kind name sha decision detail; do
     case "$kind" in
     kind | "") continue ;;
@@ -188,6 +245,9 @@ while IFS=$'\t' read -r kind name sha decision detail; do
     fi
     if [ -z "${detail// /}" ]; then
         report "ledger row '$kind $name' gives no reason"
+    fi
+    if [ "$decision" = deferred ]; then
+        check_deferral "$kind" "$name" "$detail"
     fi
 done <"$ledger"
 
