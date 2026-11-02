@@ -1,11 +1,13 @@
 # Where this fork differs from PasarGuard/scripts
 
 Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `bba95f2` (2026-10-10, #35, #36 and #37).
+Since then it has squash-ported #42 (`21f64e4`, release v0.1.10) as 9cd2d22, whose
+`tests/unit_compose_templates.sh` is copied without upstream's comments.
 
-`parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: other branches, release
-tags, and open pull requests. Each decision is pinned to that item's current SHA. A `deferred` decision must
-end its reason with `until:YYYY-MM-DD`, at most 30 days ahead; the check fails once that date has passed, so a
-deferral is decided again at least every 30 days instead of keeping the check green forever.
+`parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: single commits, other
+branches, release tags, and open pull requests. Each decision is pinned to that item's current SHA. A `deferred`
+decision must end its reason with `until:YYYY-MM-DD`, at most 30 days ahead; the check fails once that date has
+passed, so a deferral is decided again at least every 30 days instead of keeping the check green forever.
 
 `.github/workflows/upstream-parity.yml` runs `tools/check-upstream-parity.sh` daily and on every push. The check
 fails when upstream has a commit, branch, release tag or open pull request that is neither in the fork's history
@@ -144,6 +146,15 @@ What e190d3d changes:
 
 ## Small fixes to upstream functions
 
+- **`check_version_exists` in `install_command` of `pasarguard.sh` (5c14454):** a `--version vX.Y.Z` passes only
+  when the GitHub API answers HTTP 200 for its release tag. Upstream also accepts the code `000`. `latest`, `dev`
+  and `pre-release` skip this check in both.
+  - The difference changes nothing today. The code comes from
+    `curl -s -o /dev/null -w "%{http_code}" ... || echo "000"`: a curl that cannot reach `api.github.com` prints
+    `000` and fails, the fallback appends another `000`, and the comparison sees `000000`. Upstream and the fork
+    both stop with "Version vX.Y.Z does not exist".
+  - The message of 5c14454 says upstream let any version through when the API was unreachable. That is not so;
+    the fork's change only removes a branch that cannot match.
 - **`is_port_occupied` (69fde31):** it reads the port list from a here-string instead of `echo | grep -q`.
   - Under `set -o pipefail`, `echo` could take SIGPIPE after `grep -q` had matched and exited, and the match
     became a miss.

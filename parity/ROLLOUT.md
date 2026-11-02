@@ -23,14 +23,23 @@ the shared libraries in `/usr/local/lib/pasarguard-scripts/lib/` from `https://g
   therefore reinstalls the node script from its fetch repository's `main`, and restarts the node.
 - **One shared library directory:** every copy on a host uses the same library directory. If one copy fetches
   upstream and another the fork, the libraries flip between the two, depending on which copy ran last.
-- **Compose overrides are ignored.** Every `pasarguard` and `pg-node` command passes `-f docker-compose.yml` to
-  Compose, so `docker-compose.override.yml` is never read. This is upstream's behaviour, and the fork keeps it.
-  - `update`, `restart`, `core-update` and every panel-triggered node action recreate the containers from the
-    base file alone.
-  - On a host whose override pins another image, or changes ports, volumes or environment, the first such
-    command swaps the image or drops those settings.
-  - `parity/FLEET_MIGRATION.md` step 1 finds such hosts. Moving the pin into `docker-compose.yml`, or teaching
-    the scripts to read the override, is the owner's decision.
+- **Compose overrides are loaded by fork copies from 8106c07 on.** Every `$COMPOSE -f "$COMPOSE_FILE"` call in the
+  fork's `pasarguard.sh` and `pg-node.sh` goes through `compose_cmd` in `lib/docker.sh`, which passes
+  `docker-compose.yml` and then the override Compose itself would load next to it (`compose.override.yml`,
+  `compose.override.yaml`, `docker-compose.override.yml`, `docker-compose.override.yaml`, first match). See
+  `parity/DIVERGENCES.md`, "Compose override files".
+  - Some calls do not go through `compose_cmd`: the service and container lookups in the upstream-identical
+    `lib/pasarguard-backup.sh`, the Compose calls of a `--fresh` restore in `lib/pasarguard-restore.sh`, and the
+    reload command `pasarguard.sh` gives acme.sh.
+  - On a host with an override file, `update`, `restart`, `core-update` and every panel-triggered node action
+    keep the override's settings, including an image it pins. A pinned image also wins over the image in
+    `docker-compose.yml`, so `update` pulls and runs the pinned image, not the base file's, until the pin is
+    removed.
+  - Upstream copies pass only `-f docker-compose.yml` and never read the override. So do the direct Compose calls
+    of fork copies installed before 8106c07; their `compose_up`, `compose_down` and log helpers load it after the
+    next library refresh.
+  - `parity/FLEET_MIGRATION.md` step 1 finds hosts with an override. Moving a host from an upstream copy to a
+    fork copy changes what its next restart runs when the override differs from the base file.
 
 ## The fleet as reported on 2026-09-25
 
@@ -64,7 +73,7 @@ step re-inventories every host read-only.
 3. **Merge and check.** Fast-forward `main` to the tested commit, check its CI, and watch one node through a
    panel-triggered update.
    - Pick a node whose compose override check in `parity/FLEET_MIGRATION.md` step 1 found no difference.
-   - The update recreates the node from `docker-compose.yml` alone.
+   - The update recreates the node from `docker-compose.yml` and its override file, if one exists.
 
 ## Proposed change
 
