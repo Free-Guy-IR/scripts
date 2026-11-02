@@ -1130,6 +1130,46 @@ set_pasarguard_panel_image() {
     fi
 }
 
+cgroup_memory_limit_bytes() {
+    local root="${1:-/sys/fs/cgroup}" membership="${2:-/proc/self/cgroup}"
+    local base file path value lowest=""
+    if [ -f "$root/cgroup.controllers" ]; then
+        base="$root" file="memory.max"
+        path=$(awk -F: '$1 == "0" { print $3; exit }' "$membership" 2>/dev/null || true)
+    else
+        base="$root/memory" file="memory.limit_in_bytes"
+        path=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3; exit }' "$membership" 2>/dev/null || true)
+    fi
+    path="${path%/}"
+    while :; do
+        value=$(cat "$base$path/$file" 2>/dev/null || true)
+        if [[ "$value" =~ ^[0-9]+$ ]] && { [ -z "$lowest" ] || [ "$value" -lt "$lowest" ]; }; then
+            lowest="$value"
+        fi
+        [ -z "$path" ] && break
+        path="${path%/*}"
+    done
+    [ -n "$lowest" ] && echo "$lowest"
+    return 0
+}
+
+mysql_buffer_pool_size_for_ram() {
+    local meminfo="${1:-/proc/meminfo}" total_kb limit_bytes mb
+    total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)
+    if ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
+        echo "256M"
+        return
+    fi
+    limit_bytes=$(cgroup_memory_limit_bytes "${2:-}" "${3:-}")
+    if [[ "$limit_bytes" =~ ^[0-9]+$ ]] && [ $((limit_bytes / 1024)) -lt "$total_kb" ]; then
+        total_kb=$((limit_bytes / 1024))
+    fi
+    mb=$((total_kb / 1024 / 4 / 128 * 128))
+    [ "$mb" -lt 256 ] && mb=256
+    [ "$mb" -gt 4096 ] && mb=4096
+    echo "${mb}M"
+}
+
 # Download template files, configure database, and set image tag for PasarGuard installation.
 # Arguments:
 #   $1 - Version string.
@@ -1197,6 +1237,9 @@ install_pasarguard() {
             DB_PORT="3306"
             MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             echo "MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\"" >>"$ENV_FILE"
+            MYSQL_BUFFER_POOL_SIZE=$(mysql_buffer_pool_size_for_ram /proc/meminfo)
+            echo "MYSQL_BUFFER_POOL_SIZE=\"$MYSQL_BUFFER_POOL_SIZE\"" >>"$ENV_FILE"
+            colorized_echo green "$db_name buffer pool: $MYSQL_BUFFER_POOL_SIZE (change MYSQL_BUFFER_POOL_SIZE in .env)"
         fi
 
         if [[ "$database_type" =~ ^(postgresql|timescaledb)$ ]]; then
