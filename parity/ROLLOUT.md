@@ -35,9 +35,11 @@ the shared libraries in `/usr/local/lib/pasarguard-scripts/lib/` from `https://g
     keep the override's settings, including an image it pins. A pinned image also wins over the image in
     `docker-compose.yml`, so `update` pulls and runs the pinned image, not the base file's, until the pin is
     removed.
-  - Upstream copies pass only `-f docker-compose.yml` and never read the override. So do the direct Compose calls
-    of fork copies installed before 8106c07; their `compose_up`, `compose_down` and log helpers load it after the
-    next library refresh.
+  - Upstream copies pass only `-f docker-compose.yml` and never read the override, as long as their library
+    refresh succeeds. When it fails, an upstream copy sources whatever `lib/docker.sh` the shared library
+    directory holds; if a fork copy refreshed it last, that is the fork's, and its `compose_up` and
+    `compose_down` load the override. The direct Compose calls of fork copies installed before 8106c07 never read it; their
+    `compose_up`, `compose_down` and log helpers load it after the next library refresh.
   - `parity/FLEET_MIGRATION.md` step 1 finds hosts with an override. Moving a host from an upstream copy to a
     fork copy changes what its next restart runs when the override differs from the base file.
 
@@ -57,8 +59,11 @@ step re-inventories every host read-only.
    minutes on nodes whose panel triggers node-serviced actions. There is no test step.
 2. **Node scripts:** every fork node whose panel triggers a node update reinstalls `pg-node` itself from the fork's
    `main`, then restarts the node.
-3. **Upstream copies:** copies that fetch `PasarGuard/scripts`, production's `pasarguard` among them, are not
-   affected at all until they are migrated. See `parity/FLEET_MIGRATION.md`.
+3. **Upstream copies:** copies that fetch `PasarGuard/scripts`, production's `pasarguard` among them, keep
+   upstream's libraries as long as their library refresh succeeds. When it fails, they source whatever library
+   files the shared directory holds, which are the fork's for every file a fork copy refreshed last, until a
+   refresh succeeds again. See
+   `parity/FLEET_MIGRATION.md`.
 
 ## Before every push to main
 

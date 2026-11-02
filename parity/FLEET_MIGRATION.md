@@ -78,22 +78,28 @@ diff <(docker compose -f "$app_dir/docker-compose.yml" config) <(cd "$app_dir" &
     echo "override changes nothing"
 ```
 
-- The first `config --images` is what every upstream `pasarguard` and `pg-node` copy runs. Upstream's
+- The first `config --images` is what every upstream `pasarguard` and `pg-node` copy runs while its library
+  refresh succeeds. Upstream's
   `lib/docker.sh`, `update_node` and the panel's service helpers all pass `-f docker-compose.yml`, so Compose
   ignores `docker-compose.override.yml`. Fork copies from 8106c07 on load the override through `compose_cmd` (see
   `parity/ROLLOUT.md`), so on a host where the two lists differ, the first restart after the migration can change
   what runs.
 - The second is what `docker compose up` run by hand in `$app_dir` runs, with the override merged in.
 - **STOP when the image lists differ.** Do not migrate that host, do not restart it and do not trigger any update
-  on it. On an upstream copy, the first `update`, `restart`, `core-update` or panel-triggered node action
-  recreates the container from the base file alone, which swaps its image. A fork copy recreates it with the
-  override's image, which differs from what runs whenever the container was last started without the override.
+  on it. On an upstream copy whose library refresh succeeds, the first `update`, `restart`, `core-update` or
+  panel-triggered node action recreates the container from the base file alone, which swaps its image whenever
+  the container was last started with the override. When that refresh fails, the upstream copy sources whatever
+  `lib/docker.sh` the shared library directory holds; if a fork copy refreshed it last, that is the fork's, and
+  its `compose_up` and `compose_down` load the override. A fork copy recreates the container with the override's
+  image, which differs from what runs whenever the container was last started without the override.
   - Record the difference in the KG and hand it to the owner.
   - The owner then decides whether to move the pin into `docker-compose.yml` or to keep that host out of the
     scripts' restarts.
 - **STOP as well when the full `config` diff shows any other difference**, such as ports, volumes, environment or
-  devices. On an upstream copy the same restarts drop those settings; a fork copy applies them, which changes a
-  container that was last started without them.
+  devices. On an upstream copy whose library refresh succeeds, the same restarts drop those settings whenever the
+  container was last started with them; with the fork's `lib/docker.sh` left in the shared directory, its
+  `compose_up` and `compose_down` load the override, and `compose_up` applies them. A fork copy applies them, which changes a container that was last
+  started without them.
 - Record the `ls -la` output. The rollback uses it to tell which files the migration created.
 
 ## 2. Backup (every host, before any change)

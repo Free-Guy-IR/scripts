@@ -233,7 +233,7 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
         local name="$1" inventory="$2" stage="$WORK_DIR/build-$1"
         rm -rf "$stage"
         mkdir -p "$stage/pasarguard_data"
-        printf 'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////%s/db.sqlite3"\n' "${DATA_DIR#/}" >"$stage/.env"
+        printf 'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////%s/db.sqlite3"\n%s' "${DATA_DIR#/}" "${3:-}" >"$stage/.env"
         printf 'services:\n  pasarguard:\n    image: pasarguard/panel:latest\n' >"$stage/docker-compose.yml"
         sqlite3 "$stage/db.sqlite3" "CREATE TABLE alembic_version (version_num varchar(32)); INSERT INTO alembic_version VALUES ('abc');"
         printf 'cert\n' >"$stage/pasarguard_data/cert.pem"
@@ -283,7 +283,9 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
 
     # A --fresh run that stopped after provisioning is continued by the same command.
     ensure_docker_service_running() { :; }
-    make_sqlite_archive resume keep
+    make_sqlite_archive resume keep $'MYSQL_BUFFER_POOL_SIZE="4096M"\n'
+    # shellcheck disable=SC2317
+    mysql_buffer_pool_size_for_ram() { echo 384M; }
     mkdir -p "$APP_DIR" "$DATA_DIR"
     unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
     unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
@@ -300,6 +302,7 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
     assert_true "fresh retry: data restored" test -f "$DATA_DIR/cert.pem"
     assert_false "fresh retry: marker removed after success" test -e "$APP_DIR/.pasarguard-fresh-restore"
     assert_true "fresh retry: services started at the end" grep -q ' up -d' "$FAKE_DOCKER_DIR/calls.log"
+    assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="4096M"' "fresh retry: a SQLite restore leaves the MySQL buffer pool setting alone"
 
     # The marker of another backup is not continued.
     rm -rf "$APP_DIR" "$DATA_DIR"
@@ -465,7 +468,7 @@ make_fresh_stage() {
     rm -rf "$APP_DIR" "$DATA_DIR" "$WORK_DIR/fresh"
     stage="$WORK_DIR/fresh"
     mkdir -p "$stage"
-    printf 'DB_USER=app\nDB_PASSWORD=app-pass\nDB_NAME=appdb\nSQLALCHEMY_DATABASE_URL="postgresql+asyncpg://app:app-pass@127.0.0.1:5432/appdb"\n' >"$stage/.env"
+    printf 'DB_USER=app\nDB_PASSWORD=example-pass\nDB_NAME=appdb\nSQLALCHEMY_DATABASE_URL="postgresql+asyncpg://app:example-pass@127.0.0.1:5432/appdb"\nMYSQL_BUFFER_POOL_SIZE="4096M"\n' >"$stage/.env"
     printf 'services:\n  pasarguard:\n    image: %s\n  postgresql:\n    image: postgres:16\n' "$3" >"$stage/docker-compose.yml"
     cp "$stage/docker-compose.yml" "$WORK_DIR/archived-compose.yml"
     if [ -n "${4:-}" ]; then
@@ -481,6 +484,7 @@ make_fresh_stage() {
 }
 
 reset_fake_docker
+mysql_buffer_pool_size_for_ram() { echo 384M; }
 make_fresh_stage "pasarguard/panel@$DIGEST_A" "$ID_A" "pasarguard/panel:latest"
 fake_image_present "pasarguard/panel@$DIGEST_A"
 printf 'postgres@%s\n' "$DIGEST_B" >"$FAKE_DOCKER_DIR/pullable"
@@ -500,7 +504,54 @@ assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "install_yq" "fresh: yq not insta
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps postgresql" "fresh: only the database started"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: database container from Compose returned to the caller"
 assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh: .env installed 0600"
+assert_true "fresh: a PostgreSQL .env is installed exactly as archived" cmp -s "$ENV_FILE" "$stage/.env"
 assert_eq "$(cat "$APP_DIR/.pasarguard-fresh-restore" 2>/dev/null)" "$(sha256sum <"$stage/backup-files.sha256" | awk '{print $1}')" "fresh: provisioned installation marked with the backup's inventory hash"
+
+make_mysql_fresh_stage() {
+    local service="${1:-mysql}"
+    rm -rf "$APP_DIR" "$DATA_DIR" "$WORK_DIR/fresh"
+    stage="$WORK_DIR/fresh"
+    mkdir -p "$stage"
+    printf 'MYSQL_ROOT_PASSWORD=example-root-pass\nDB_USER=app\nDB_PASSWORD=example-pass\nDB_NAME=appdb\nMYSQL_BUFFER_POOL_SIZE="4096M"\nSQLALCHEMY_DATABASE_URL="mysql+asyncmy://app:example-pass@127.0.0.1:3306/appdb"' >"$stage/.env"
+    printf 'services:\n  pasarguard:\n    image: pasarguard/panel:latest\n  %s:\n    image: %s:latest\n' "$service" "$service" >"$stage/docker-compose.yml"
+    write_runtime "$stage" "$service" pasarguard "pasarguard/panel@$DIGEST_A" "$ID_A" "$service" "$service@$DIGEST_B" "$ID_B"
+    jq -n --arg data "$DATA_DIR" --arg db "$service" \
+        '{services: ({pasarguard: {image: "pasarguard/panel:latest", volumes: [{type: "bind", source: $data, target: "/var/lib/pasarguard"}]}}
+                     + {($db): {image: ($db + ":latest")}}),
+          volumes: {}}' >"$FAKE_DOCKER_DIR/config.json"
+    write_backup_checksums "$stage"
+}
+
+reset_fake_docker
+make_mysql_fresh_stage
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "mysql@$DIGEST_B"
+prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh mysql: provisioning succeeds"
+assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps mysql" "fresh mysql: only the database started"
+assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="384M"' "fresh mysql: the database starts with this host's buffer pool size, not the archive's"
+assert_true "fresh mysql: the archive's last line, which had no newline, is kept intact" grep -qx 'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://app:example-pass@127.0.0.1:3306/appdb"' "$ENV_FILE"
+assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh mysql: .env stays 0600 after the size is set"
+
+reset_fake_docker
+make_mysql_fresh_stage mariadb
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "mariadb@$DIGEST_B"
+prepare_fresh_restore "$stage" mariadb "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh mariadb: provisioning succeeds"
+assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps mariadb" "fresh mariadb: only the database started"
+assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="384M"' "fresh mariadb: the database starts with this host's buffer pool size, not the archive's"
+
+reset_fake_docker
+make_mysql_fresh_stage
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "mysql@$DIGEST_B"
+(
+    unset -f mysql_buffer_pool_size_for_ram
+    prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+)
+assert_eq "$?" 0 "fresh mysql skew: a pasarguard.sh without the sizing function still provisions"
+assert_eq "$(grep -cE '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 0 "fresh mysql skew: the archive's buffer pool size is dropped, so the template default applies"
 
 # Offline: no registry digest was recorded, the original image ID is loaded.
 reset_fake_docker

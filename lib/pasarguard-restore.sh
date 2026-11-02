@@ -898,6 +898,29 @@ wait_for_recovery_database() {
 # finish; holds the SHA256 of that backup's checksum inventory.
 FRESH_RESTORE_MARKER=".pasarguard-fresh-restore"
 
+BUFFER_POOL_LINE_PATTERN='^[[:space:]]*(export[[:space:]]+)?MYSQL_BUFFER_POOL_SIZE[[:space:]]*='
+
+recovery_host_buffer_pool_line() {
+    local size=""
+    if declare -F mysql_buffer_pool_size_for_ram >/dev/null; then
+        size=$(mysql_buffer_pool_size_for_ram /proc/meminfo)
+    fi
+    [ -z "$size" ] || printf 'MYSQL_BUFFER_POOL_SIZE="%s"\n' "${size//\"/}"
+    return 0
+}
+
+pin_host_buffer_pool_line() {
+    local line="$1" target="$2"
+    [ -f "$target" ] || return 0
+    [ -z "$line" ] || [[ "$line" =~ $BUFFER_POOL_LINE_PATTERN ]] || return 1
+    sed -i -E "/$BUFFER_POOL_LINE_PATTERN/d" "$target" || return 1
+    [ -n "$line" ] || return 0
+    if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
+        printf '\n' >>"$target" || return 1
+    fi
+    printf '%s\n' "$line" >>"$target"
+}
+
 # Prepare a fresh deployment using the source images. Refuse existing app/data,
 # containers and database storage; this mode is never an in-place downgrade.
 # The archived Compose file is installed unchanged. Each recorded source image
@@ -1072,6 +1095,9 @@ prepare_fresh_restore() {
     done
     mkdir -p "$APP_DIR" "$DATA_DIR" || return 1
     install -m 600 "$stage/.env" "$ENV_FILE" || return 1
+    if [[ "$engine" =~ ^(mysql|mariadb)$ ]]; then
+        pin_host_buffer_pool_line "$(recovery_host_buffer_pool_line)" "$ENV_FILE" || return 1
+    fi
     install -m 600 "$recovery_compose" "$COMPOSE_FILE" || return 1
     # From here on the directories are no longer empty. Record which backup
     # provisioned them, so running the same --fresh command again continues
@@ -1160,6 +1186,7 @@ restore_command() {
     local current_db_name=""
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
+    local current_buffer_pool_line=""
     local requested_timescaledb_backup_version="${TIMESCALEDB_BACKUP_VERSION:-}"
     local requested_timescaledb_compat_image="${TIMESCALEDB_COMPAT_IMAGE:-}"
     local sqlite_basename=""
@@ -1208,7 +1235,11 @@ restore_command() {
                 ;;
             esac
         done <"$ENV_FILE"
+        current_buffer_pool_line=$(tr -d '\000' <"$ENV_FILE" | grep -aE "$BUFFER_POOL_LINE_PATTERN" | tail -n 1)
         set -e
+    fi
+    if [ "$fresh_restore" = true ] || [ "$fresh_resume" = true ]; then
+        current_buffer_pool_line=$(recovery_host_buffer_pool_line)
     fi
 
     local backup_dir="$APP_DIR/backup"
@@ -2393,6 +2424,10 @@ restore_command() {
                 replace_or_append_env_var "SQLALCHEMY_DATABASE_URL" "$current_sqlalchemy_url" true "$ENV_FILE"
             fi
         fi
+        if [[ "$db_type" =~ ^(mysql|mariadb)$ ]] && ! pin_host_buffer_pool_line "$current_buffer_pool_line" "$ENV_FILE"; then
+            colorized_echo red "Failed to keep this host's MYSQL_BUFFER_POOL_SIZE in .env."
+            cleanup_and_exit_restore_error 1
+        fi
     fi
 
     if [[ "$db_type" != "sqlite" ]] && [ -s "$current_compose_snapshot" ]; then
@@ -2401,6 +2436,15 @@ restore_command() {
             cleanup_and_exit_restore_error 1
         fi
         colorized_echo blue "Preserved destination docker-compose.yml."
+    fi
+    if [[ "$db_type" =~ ^(mysql|mariadb)$ ]]; then
+        if ! grep -qs 'MYSQL_BUFFER_POOL_SIZE' "$COMPOSE_FILE" "$APP_DIR"/compose.override.y*ml "$APP_DIR"/docker-compose.override.y*ml; then
+            colorized_echo yellow "Neither docker-compose.yml nor its override reads MYSQL_BUFFER_POOL_SIZE, so .env does not set the buffer pool size."
+        elif [ -n "$current_buffer_pool_line" ]; then
+            colorized_echo blue "Buffer pool setting for this host: $current_buffer_pool_line"
+        else
+            colorized_echo blue "Buffer pool setting for this host: MYSQL_BUFFER_POOL_SIZE is unset, so the Compose default applies."
+        fi
     fi
 
     # Keep staging/logs until starting services has succeeded. Fresh recovery

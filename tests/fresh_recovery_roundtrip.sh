@@ -81,6 +81,17 @@ esac
 docker image inspect "$app_image" >/dev/null 2>&1 || docker pull "$app_image" >/dev/null
 docker tag "$app_image" "$panel_ref"
 
+host_pool=""
+if declare -F mysql_buffer_pool_size_for_ram >/dev/null; then host_pool=$(mysql_buffer_pool_size_for_ram /proc/meminfo); fi
+source_pool=1152M
+[ "$host_pool" != "$source_pool" ] || source_pool=1280M
+pool_lines() { grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE[[:space:]]*=' "$ENV_FILE" || true; }
+expected_pool_lines="MYSQL_BUFFER_POOL_SIZE=\"$source_pool\""
+if [[ "$engine" =~ ^(mysql|mariadb)$ ]]; then
+    expected_pool_lines=""
+    [ -z "$host_pool" ] || expected_pool_lines="MYSQL_BUFFER_POOL_SIZE=\"$host_pool\""
+fi
+
 cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
 MYSQL_ROOT_PASSWORD=fixture-password
@@ -88,6 +99,7 @@ DB_USER=appuser
 DB_PASSWORD=fixture-password
 DB_NAME=appdb
 SQLALCHEMY_DATABASE_URL="$url"
+MYSQL_BUFFER_POOL_SIZE="$source_pool"
 EOF
 
 # Write the Compose file; $1 is the database healthcheck mode (see usage).
@@ -116,6 +128,11 @@ EOF
     volumes:
       - $DATA_DIR/$dbservice:$target
 EOF
+    # shellcheck disable=SC2016
+    case "$engine" in
+        mysql) printf '    command: ["--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}", "--innodb-buffer-pool-instances=1"]\n' ;;
+        mariadb) printf '    command: ["--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}"]\n' ;;
+    esac >>"$COMPOSE_FILE"
     case "$1" in
         no-healthcheck) return 0 ;;
         failing-healthcheck)
@@ -165,7 +182,7 @@ run_sql "$cid" "CREATE TABLE ci_recovery (value integer); INSERT INTO ci_recover
 printf 'original-state\n' >"$DATA_DIR/sentinel.txt"
 write_compose "$healthcheck"
 
-backup_command
+(backup_command)
 archive=$(find "$APP_DIR/backup" -maxdepth 1 -name '*.zip' | head -n 1)
 [ -n "$archive" ] || fail "backup produced no archive"
 cp "$archive" "$root/recovery.zip"
@@ -192,6 +209,8 @@ if [ "$healthcheck" = failing-healthcheck ]; then
         fail "--fresh succeeded although the database never became healthy"
     fi
     [ -f "$APP_DIR/.pasarguard-fresh-restore" ] || fail "no retry marker after the failed --fresh"
+    [ "$(pool_lines)" = "$expected_pool_lines" ] || fail "the failed --fresh provisioned .env with buffer pool '$(pool_lines)', expected '$expected_pool_lines'"
+    replace_or_append_env_var MYSQL_BUFFER_POOL_SIZE "$source_pool" true "$ENV_FILE"
     # As an administrator would after reading the log: let the database finish
     # starting, then run the same command again.
     wait_until_database_answers "$(dc ps -q "$dbservice")" || fail "database did not answer after the failed --fresh"
@@ -205,6 +224,7 @@ echo "fresh recovery took $(($(date +%s) - started))s"
 cmp -s "$root/archived-compose.yml" "$COMPOSE_FILE" || fail "installed docker-compose.yml differs from the archived one"
 [ ! -f "$APP_DIR/backup-runtime.tsv" ] || fail "recovery metadata left in the application directory"
 [ ! -f "$APP_DIR/backup-files.sha256" ] || fail "checksum inventory left in the application directory"
+[ "$(pool_lines)" = "$expected_pool_lines" ] || fail "recovered .env has buffer pool '$(pool_lines)', expected '$expected_pool_lines' for this host (archive had $source_pool)"
 
 # Every service runs exactly the image recorded at backup time.
 while IFS=$'\t' read -r kind service _digest image_id; do
@@ -222,5 +242,12 @@ if [ "$engine" != sqlite ]; then
     fi
 fi
 [ "$(run_sql "$cid" 'SELECT value FROM ci_recovery;')" = 42 ] || fail "database row not restored"
+if [[ "$engine" =~ ^(mysql|mariadb)$ ]]; then
+    pool_mb="${host_pool:-256M}"
+    pool_mb="${pool_mb%M}"
+    running_pool=$(run_sql "$cid" 'SELECT @@innodb_buffer_pool_size;')
+    [ "$running_pool" = "$((pool_mb * 1024 * 1024))" ] || fail "$engine runs a ${running_pool}-byte buffer pool, expected ${pool_mb}M for this host"
+    echo "$engine buffer pool after recovery: ${pool_mb}M (archive had $source_pool)"
+fi
 
 echo "PASS: $engine fresh recovery ($healthcheck): data restored, Compose file unchanged, recorded images running"

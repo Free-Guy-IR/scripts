@@ -108,6 +108,8 @@ jobs:
             healthcheck: no-healthcheck
           - database: postgresql
             healthcheck: failing-healthcheck
+          - database: mysql
+            healthcheck: failing-healthcheck
 
     steps:
       - name: Checkout

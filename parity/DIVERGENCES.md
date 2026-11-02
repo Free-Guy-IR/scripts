@@ -2,7 +2,8 @@
 
 Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `bba95f2` (2026-10-10, #35, #36 and #37).
 Since then it has squash-ported #42 (`21f64e4`, release v0.1.10) as 9cd2d22, whose
-`tests/unit_compose_templates.sh` is copied without upstream's comments.
+`tests/unit_compose_templates.sh` is copied without upstream's comments, and #45 (`ffc9df4`, release v0.1.11) with
+the restore change described under "MySQL and MariaDB buffer pool size".
 
 `parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: single commits, other
 branches, release tags, and open pull requests. Each decision is pinned to that item's current SHA. A `deferred`
@@ -182,6 +183,44 @@ the panel or node image, that silently rolls the image back.
   containers.
 - Tests: `tests/test_compose_override_honoured.sh`, `tests/test_restore_keeps_destination_override.sh`.
 
+## MySQL and MariaDB buffer pool size (upstream #45, release v0.1.11)
+
+Upstream #45 makes the MySQL and MariaDB templates read `--innodb-buffer-pool-size` from
+`${MYSQL_BUFFER_POOL_SIZE:-256M}`, and the installer writes about 25% of the host's RAM to `.env`. The value
+describes the host, but upstream's restore treats `.env` as source data: an ordinary restore copies the archive's
+`.env` and puts back only the destination's database credentials, and `restore --fresh` installs the archive's
+`.env` whole. A backup from a 16 GB host then starts MySQL on a 2 GB host with a 4096M pool, and a backup from an
+install without the variable drops the destination's size back to 256M.
+
+- The port's code, tests and docs are upstream's without upstream's code comments; the two edited compose lines
+  keep the fork's existing trailing comment text, and the test block carries a `# shellcheck disable=SC2016`
+  pragma and sits after the fork's PgBouncer checks in `tests/unit_pasarguard.sh`. `install` passes
+  `/proc/meminfo` explicitly, which changes nothing and keeps shellcheck quiet.
+- `lib/pasarguard-restore.sh` changes the `MYSQL_BUFFER_POOL_SIZE` line only for MySQL and MariaDB restores;
+  SQLite, PostgreSQL and TimescaleDB restores leave the archive's `MYSQL_BUFFER_POOL_SIZE` line as it is.
+  - An ordinary restore keeps the destination's `MYSQL_BUFFER_POOL_SIZE` line exactly as it was (the last one,
+    when there are several, which is the one Compose uses), as it keeps its credentials, and appends it at the end
+    of `.env`. When the destination has none, the archive's value is removed, `export` lines included, so the
+    template default applies as before. NUL bytes in the destination's `.env` do not hide the line.
+  - The line is written on a line of its own, also when the archive's `.env` has no final newline, and a line that
+    does not begin as a `MYSQL_BUFFER_POOL_SIZE` assignment is refused instead of written.
+  - `restore --fresh` sets the value for the recovery host right after it installs the archive's `.env`, before the
+    database starts, and again after the app-directory sync installs the archive's `.env` a second time.
+  - A `--fresh` run that stopped and is continued as an ordinary restore also sets the value for the recovery
+    host, because its `.env` may come from an earlier attempt.
+  - The size comes from `mysql_buffer_pool_size_for_ram` in `pasarguard.sh`. A `pasarguard.sh` installed before
+    the port lacks it while it loads the refreshed library; the restore then removes the archive's value instead
+    of failing.
+  - When neither the destination's `docker-compose.yml` nor any of the four override file names mentions the
+    variable (an install from before the port), the restore says that `.env` does not set the buffer pool size.
+- The offline installer `iran-sanction/pasarguard-standalone.sh` does not write the variable, as upstream's does
+  not, so its installs run the template's 256M.
+- `docs/database-configurations.md` says what a restore does with the value.
+- Tests: `tests/test_restore_keeps_host_buffer_pool.sh`, the MySQL, MariaDB, PostgreSQL and SQLite cases in
+  `tests/unit_restore_recovery.sh`, and `tests/fresh_recovery_roundtrip.sh`, which also checks the size the
+  recovered MySQL or MariaDB runs with. `.github/workflows/backup-restore.yml` runs that roundtrip for a MySQL
+  `--fresh` that stops and is continued, too.
+
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 
 **Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 5f61243.
@@ -238,9 +277,15 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_node_env_write_requires_lock.sh`
 - `test_upstream_parity_check.sh`
 - `test_fork_workflow_hardening.sh`
+- `test_compose_override_honoured.sh`
+- `test_restore_keeps_destination_override.sh`
+- `test_pgbouncer_console_read_only.sh`
+- `test_restore_keeps_host_buffer_pool.sh`
 - `test_run_isolated.sh`
 
-Every workflow test step, and every suite in `tests/run_all.sh`, runs through `tests/run_isolated.sh`. The harness
+Every test step of `fork-regression-tests.yml`, `upstream-parity.yml` and `pgbouncer-prepared-statements.yml`,
+and every suite in `tests/run_all.sh`, runs through `tests/run_isolated.sh`; the parity check itself and the steps
+of `backup-restore.yml` and `script-update-safety.yml` do not. The harness
 gives the test a private `TMPDIR`, fails it when it leaves anything there, and removes the directory either way.
 It exists because `pg-node.sh`'s transaction and staging code runs `trap - EXIT` in the caller's shell, which
 silently dropped the cleanup trap of tests that source it; their `WORK_DIR`s piled up in `/tmp` on the test host.
