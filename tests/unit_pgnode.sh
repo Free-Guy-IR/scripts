@@ -814,6 +814,57 @@ else
     fail "sync_env_ssl_paths: already-correct paths left unchanged"
 fi
 
+if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefarah"; then
+    for mount_case in "/var/lib/my-node:/var/lib/pg-node|keep" "/var/lib/my-node:/var/lib/pg-node:rw|keep" \
+        "$DATA_DIR:$DATA_DIR|rewrite"; do
+        mount_volume="${mount_case%%|*}"
+        cat > "$APP_DIR/docker-compose.yml" <<EOF
+services:
+  node:
+    image: ghcr.io/free-guy-ir/node:latest
+    volumes:
+      - $mount_volume
+EOF
+        cat > "$ENV_FILE" <<'EOF'
+SERVICE_PORT= 62050
+SSL_CERT_FILE= /var/lib/pg-node/certs/ssl_cert.pem
+SSL_KEY_FILE= /var/lib/pg-node/certs/ssl_key.pem
+EOF
+        cp "$ENV_FILE" "$WORK_DIR/env-mount-before"
+        sync_env_ssl_paths
+        if [ "${mount_case#*|}" = "keep" ]; then
+            assert_true "sync_env_ssl_paths: volume $mount_volume mounts the data at /var/lib/pg-node, so .env stays byte-identical" \
+                cmp -s "$WORK_DIR/env-mount-before" "$ENV_FILE"
+        else
+            assert_true "sync_env_ssl_paths: volume $mount_volume, cert path follows the data dir" \
+                grep -qx "SSL_CERT_FILE= $expected_cert" "$ENV_FILE"
+        fi
+    done
+    rm -f "$APP_DIR/docker-compose.yml"
+else
+    echo "(skipped sync_env_ssl_paths mount cases: mikefarah yq v4 not available)"
+fi
+
+update_skip_out=$(
+    APP_NAME="my-node"
+    SERVICE_NAME=""
+    check_running_as_root() { :; }
+    is_node_installed() { return 0; }
+    detect_compose() { COMPOSE="true"; }
+    update_node_script() { :; }
+    uninstall_completion() { :; }
+    install_completion() { :; }
+    update_node() { :; }
+    down_node() { :; }
+    up_node() { :; }
+    update_command --no-update-service 2>&1
+)
+if [[ "$update_skip_out" == *"Skipped updating my-node-service (due to --no-update-service)"* ]]; then
+    pass "update --no-update-service: the skip message names the service"
+else
+    fail "update --no-update-service: the skip message names the service (got: $update_skip_out)"
+fi
+
 # Case 4: missing ENV_FILE — function must not crash
 APP_NAME="my-node"
 ENV_FILE="/nonexistent/dir/.env"

@@ -2525,12 +2525,25 @@ sync_env_ssl_paths() {
     if [ ! -f "$ENV_FILE" ]; then
         return
     fi
+    if [ "$(node_compose_data_mount_target)" = "/var/lib/pg-node" ]; then
+        return 0
+    fi
     node_env_ssl_paths_stale || return 0
     acquire_node_env_lock "${NODE_ENV_LOCK_WAIT_SECONDS:-10}" || return 1
     local sync_status=0
     apply_node_env_ssl_paths || sync_status=$?
     release_node_env_lock
     return "$sync_status"
+}
+
+node_compose_data_mount_target() {
+    local volume
+    [ -f "$APP_DIR/docker-compose.yml" ] || return 0
+    command -v yq >/dev/null 2>&1 || return 0
+    volume=$(yq eval -r '.services["node"].volumes[0] // ""' "$APP_DIR/docker-compose.yml" 2>/dev/null) || return 0
+    [[ "$volume" == *:* ]] || return 0
+    volume="${volume#*:}"
+    printf '%s\n' "${volume%%:*}"
 }
 
 node_env_ssl_paths_stale() {
@@ -3576,7 +3589,7 @@ update_command() {
     if [ "$no_update_service" = false ]; then
         update_service_if_installed
     else
-        colorized_echo yellow "Skipped updating $SERVICE_NAME (due to --no-update-service)"
+        colorized_echo yellow "Skipped updating ${APP_NAME}-service (due to --no-update-service)"
     fi
 
     colorized_echo blue "node updated successfully"
