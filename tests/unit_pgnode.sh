@@ -906,5 +906,501 @@ unset -f sysctl
 assert_true "bash completion lists l2tp-enable" bash -c "$(declare -f generate_bash_completion); APP_NAME=x generate_bash_completion | grep -q l2tp-enable"
 assert_true "zsh completion lists l2tp-enable" bash -c "$(declare -f generate_zsh_completion); APP_NAME=x generate_zsh_completion | grep -q l2tp-enable"
 
+INSTALL_CALLS="$WORK_DIR/install-calls.log"
+INSTALL_OUT=""
+INSTALL_STATUS=0
+INSTALL_CASE_DIR=""
+RELEASE_API_MODE="normal"
+release_api_reply() {
+    case "$RELEASE_API_MODE" in
+        empty) return 0 ;;
+        ratelimit)
+            case "$*" in
+                *"%{http_code}"*) printf '403' ;;
+                *) printf '{"message":"API rate limit exceeded"}' ;;
+            esac
+            return 0
+            ;;
+        rc_of_stable)
+            case "$*" in
+                *"%{http_code}"*) printf '200' ;;
+                */releases/latest*) printf '{"tag_name":"v9.9.9"}' ;;
+                */releases) printf '[{"tag_name":"v9.9.9-rc.1","prerelease":true}]' ;;
+                *) printf '{}' ;;
+            esac
+            return 0
+            ;;
+        fork_suffixed)
+            case "$*" in
+                *"%{http_code}"*) printf '200' ;;
+                */releases/latest*) printf '{"tag_name":"v0.8.20-degraded-start"}' ;;
+                */releases) printf '[{"tag_name":"v0.8.20-degraded-start","prerelease":false}]' ;;
+                *) printf '{}' ;;
+            esac
+            return 0
+            ;;
+    esac
+    case "$*" in
+        *"/tags/v9.9.99"*) printf '404' ;;
+        *"%{http_code}"*) printf '200' ;;
+        */releases/latest*) printf '{"tag_name":"v9.9.9"}' ;;
+        */releases) printf '[{"tag_name":"v9.9.10-beta","prerelease":true}]' ;;
+        *) printf '{}' ;;
+    esac
+}
+
+run_install_command() {
+    : > "$INSTALL_CALLS"
+    if INSTALL_OUT=$(
+        if [ -n "$INSTALL_CASE_DIR" ]; then
+            APP_DIR="$INSTALL_CASE_DIR"
+            COMPOSE_FILE="$APP_DIR/docker-compose.yml"
+        fi
+        check_running_as_root() { :; }
+        print_script_execution_header() { :; }
+        is_node_installed() { return 1; }
+        detect_os() { :; }
+        install_package() { :; }
+        install_docker() { :; }
+        ensure_docker_compose() { :; }
+        install_yq() { :; }
+        detect_compose() { :; }
+        curl() { echo "curl $*" >> "$INSTALL_CALLS"; release_api_reply "$@"; }
+        install_node() { echo "install_node $1" >> "$INSTALL_CALLS"; }
+        install_node_script() { :; }
+        install_completion() { :; }
+        prepare_host_devices() { :; }
+        up_node() { :; }
+        show_node_logs() { :; }
+        install_service_command() { :; }
+        INSTALL_SERVICE_CHOICE="n"
+        SERVICE_PORT="62050"
+        API_KEY="00000000-0000-4000-8000-000000000000"
+        SSL_CERT_FILE="/dev/null"
+        install_command "$@" 2>&1
+    ); then
+        INSTALL_STATUS=0
+    else
+        INSTALL_STATUS=$?
+    fi
+}
+
+installed_version() {
+    sed -n 's/^install_node //p' "$INSTALL_CALLS"
+}
+
+release_lookup_done() {
+    grep -q "api.github.com/repos/Free-Guy-IR/node/releases" "$INSTALL_CALLS"
+}
+
+run_install_command --dev
+assert_eq "$INSTALL_STATUS" "0" "install --dev: exits 0"
+assert_eq "$(installed_version)" "dev" "install --dev: installs image tag dev"
+assert_false "install --dev: skips the GitHub release lookup" release_lookup_done
+if [[ "$INSTALL_OUT" == *"unreleased"* ]]; then
+    pass "install --dev: prints the unreleased build note"
+else
+    fail "install --dev: prints the unreleased build note"
+fi
+if [[ "$INSTALL_OUT" == *"ghcr.io/free-guy-ir/node:dev is an unreleased"* && "$INSTALL_OUT" != *"pasarguard/node:dev"* ]]; then
+    pass "install --dev: the note names the fork image, not pasarguard/node:dev"
+else
+    fail "install --dev: the note names the fork image, not pasarguard/node:dev (got: $INSTALL_OUT)"
+fi
+
+for dev_conflict in "--dev --version v1.2.3" "--version v1.2.3 --dev" "--dev --pre-release" "--pre-release --dev" "-v v1.2.3 --dev"; do
+    # shellcheck disable=SC2086
+    run_install_command $dev_conflict
+    assert_eq "$INSTALL_STATUS" "1" "install $dev_conflict: exits 1"
+    assert_eq "$(installed_version)" "" "install $dev_conflict: installs nothing"
+    if [[ "$INSTALL_OUT" == *"Cannot use --pre-release, --dev and --version options simultaneously."* ]]; then
+        pass "install $dev_conflict: names all three exclusive options"
+    else
+        fail "install $dev_conflict: names all three exclusive options (got: $INSTALL_OUT)"
+    fi
+done
+
+run_install_command
+assert_eq "$INSTALL_STATUS" "0" "install (latest): exits 0"
+assert_eq "$(installed_version)" "latest" "install (latest): installs image tag latest"
+assert_true "install (latest): checks releases/latest" grep -q "Free-Guy-IR/node/releases/latest" "$INSTALL_CALLS"
+if [[ "$INSTALL_OUT" != *"unreleased"* ]]; then
+    pass "install (latest): no dev note"
+else
+    fail "install (latest): no dev note"
+fi
+
+run_install_command --pre-release
+assert_eq "$INSTALL_STATUS" "0" "install --pre-release: exits 0"
+assert_eq "$(installed_version)" "v9.9.10-beta" "install --pre-release: installs the newest release tag"
+
+RELEASE_API_MODE="rc_of_stable"
+run_install_command --pre-release
+RELEASE_API_MODE="normal"
+assert_eq "$INSTALL_STATUS" "0" "install --pre-release, rc older than stable: exits 0"
+assert_eq "$(installed_version)" "v9.9.9" "install --pre-release, rc older than stable: installs the stable release"
+
+RELEASE_API_MODE="fork_suffixed"
+run_install_command --pre-release
+RELEASE_API_MODE="normal"
+assert_eq "$(installed_version)" "v0.8.20-degraded-start" "install --pre-release, fork suffixed stable tag: installs it"
+
+run_install_command --version v1.2.3
+assert_eq "$INSTALL_STATUS" "0" "install --version v1.2.3: exits 0"
+assert_eq "$(installed_version)" "v1.2.3" "install --version v1.2.3: installs image tag v1.2.3"
+assert_true "install --version v1.2.3: checks releases/tags/v1.2.3" grep -q "Free-Guy-IR/node/releases/tags/v1.2.3" "$INSTALL_CALLS"
+
+run_install_command --version v0.8.20-degraded-start
+assert_eq "$INSTALL_STATUS" "0" "install --version v0.8.20-degraded-start: exits 0"
+assert_eq "$(installed_version)" "v0.8.20-degraded-start" "install --version v0.8.20-degraded-start: installs the suffixed fork tag"
+
+for bad_version in 1.2 v1.2 "v1.2.3+build.5" "v1.2.3-" "v1.2.3_x" "v1.2.3-$(printf 'a%.0s' $(seq 1 130))" "latest-dev"; do
+    run_install_command --version "$bad_version"
+    assert_eq "$INSTALL_STATUS" "1" "install --version ${bad_version:0:24}: rejects an invalid tag"
+    assert_eq "$(installed_version)" "" "install --version ${bad_version:0:24}: installs nothing"
+    assert_false "install --version ${bad_version:0:24}: no release lookup" release_lookup_done
+done
+
+run_install_command --version v1.2.3 --pre-release
+assert_eq "$INSTALL_STATUS" "1" "install --version with --pre-release: exits 1"
+
+for api_mode in empty ratelimit; do
+    RELEASE_API_MODE="$api_mode"
+    run_install_command --pre-release
+    RELEASE_API_MODE="normal"
+    assert_eq "$INSTALL_STATUS" "1" "install --pre-release, GitHub $api_mode: exits 1"
+    assert_false "install --pre-release, GitHub $api_mode: install_node not called" grep -q "^install_node" "$INSTALL_CALLS"
+done
+
+RELEASE_API_MODE="empty"
+run_install_command
+RELEASE_API_MODE="normal"
+assert_eq "$INSTALL_STATUS" "0" "install (latest), GitHub unreachable: exits 0"
+assert_eq "$(installed_version)" "latest" "install (latest), GitHub unreachable: installs image tag latest"
+
+if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefarah"; then
+    INSTALL_CASE_DIR="$WORK_DIR/install-override"
+    mkdir -p "$INSTALL_CASE_DIR"
+    printf 'services:\n  node:\n    image: ghcr.io/free-guy-ir/node:v0.8.20-degraded-start\n' > "$INSTALL_CASE_DIR/docker-compose.override.yml"
+    for pinned_case in "--dev" "--version v1.2.3" "--pre-release"; do
+        # shellcheck disable=SC2086
+        run_install_command $pinned_case
+        assert_eq "$INSTALL_STATUS" "1" "install $pinned_case with an override pinning the image: exits 1"
+        assert_eq "$(installed_version)" "" "install $pinned_case with an override pinning the image: installs nothing"
+        if [[ "$INSTALL_OUT" == *"docker-compose.override.yml pins the node image to ghcr.io/free-guy-ir/node:v0.8.20-degraded-start"* ]]; then
+            pass "install $pinned_case with an override pinning the image: names the file and the pinned image"
+        else
+            fail "install $pinned_case with an override pinning the image: names the file and the pinned image (got: $INSTALL_OUT)"
+        fi
+    done
+    run_install_command
+    assert_eq "$INSTALL_STATUS" "0" "install (default latest) with an override pinning the image: proceeds"
+    assert_eq "$(installed_version)" "latest" "install (default latest) with an override pinning the image: installs latest"
+    printf 'services:\n  node:\n    environment:\n      EXAMPLE: "1"\n' > "$INSTALL_CASE_DIR/docker-compose.override.yml"
+    run_install_command --dev
+    assert_eq "$INSTALL_STATUS" "0" "install --dev with an override that pins no image: exits 0"
+    assert_eq "$(installed_version)" "dev" "install --dev with an override that pins no image: installs dev"
+    printf 'services: [unclosed\n' > "$INSTALL_CASE_DIR/docker-compose.override.yml"
+    run_install_command --dev
+    assert_eq "$INSTALL_STATUS" "1" "install --dev with an unreadable override: exits 1"
+    assert_eq "$(installed_version)" "" "install --dev with an unreadable override: installs nothing"
+    INSTALL_CASE_DIR=""
+
+    image_compose="$WORK_DIR/image-test/docker-compose.yml"
+    mkdir -p "$(dirname "$image_compose")"
+    cp "$ROOT_DIR/docker-compose/node.yml" "$image_compose"
+    if set_node_image_tag "dev" "$image_compose"; then
+        pass "set_node_image_tag: dev rewrite succeeds"
+    else
+        fail "set_node_image_tag: dev rewrite succeeds"
+    fi
+    assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "ghcr.io/free-guy-ir/node:dev" \
+        "set_node_image_tag: image becomes ghcr.io/free-guy-ir/node:dev"
+    assert_eq "$(yq eval -r '.services["node"].container_name' "$image_compose")" "node" \
+        "set_node_image_tag: other keys untouched"
+    if set_node_image_tag "v0.8.20-degraded-start" "$image_compose"; then
+        pass "set_node_image_tag: suffixed release rewrite succeeds"
+    else
+        fail "set_node_image_tag: suffixed release rewrite succeeds"
+    fi
+    assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start" \
+        "set_node_image_tag: a dev compose file can move back to a suffixed release tag"
+
+    for image_case in "pasarguard/node|pasarguard/node:dev" \
+        "registry.example.com:5000/pasarguard/node:latest|registry.example.com:5000/pasarguard/node:dev" \
+        "registry.example.com:5000/pasarguard/node|registry.example.com:5000/pasarguard/node:dev" \
+        "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start|ghcr.io/free-guy-ir/node:dev" \
+        "mirror.example.com/pasarguard/node:v0.5.4|mirror.example.com/pasarguard/node:dev"; do
+        image_before="${image_case%%|*}"
+        image_after="${image_case#*|}"
+        yq eval ".services[\"node\"].image = \"$image_before\"" -i "$image_compose"
+        if set_node_image_tag "dev" "$image_compose"; then
+            pass "set_node_image_tag: $image_before rewrite succeeds"
+        else
+            fail "set_node_image_tag: $image_before rewrite succeeds"
+        fi
+        assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "$image_after" \
+            "set_node_image_tag: $image_before -> $image_after"
+    done
+else
+    echo "(skipped set_node_image_tag and override checks: mikefarah yq v4 not available)"
+fi
+
+INSTALL_TAG_CALLS="$WORK_DIR/install-tag-calls.log"
+for tag_case in "dev fail" "v1.2.3 fail" "dev ok" "latest fail"; do
+    read -r tag_version tag_result <<<"$tag_case"
+    : > "$INSTALL_TAG_CALLS"
+    if tag_out=$(
+        set_node_image_tag() { echo "set_node_image_tag $1" >> "$INSTALL_TAG_CALLS"; [ "$tag_result" = "ok" ]; }
+        set_install_image_tag "$tag_version" "$WORK_DIR/unused-compose.yml" 2>&1
+    ); then
+        tag_status=0
+    else
+        tag_status=$?
+    fi
+    case "$tag_case" in
+        "latest fail")
+            assert_eq "$tag_status" "0" "set_install_image_tag latest: exits 0"
+            assert_false "set_install_image_tag latest: no rewrite" test -s "$INSTALL_TAG_CALLS"
+            ;;
+        *fail)
+            assert_eq "$tag_status" "1" "set_install_image_tag $tag_version, rewrite fails: exits 1"
+            assert_true "set_install_image_tag $tag_version, rewrite fails: names the tag and mikefarah yq v4" \
+                grep -q "${tag_version}.*mikefarah yq v4" <<<"$tag_out"
+            ;;
+        *ok)
+            assert_eq "$tag_status" "0" "set_install_image_tag $tag_version, rewrite ok: exits 0"
+            ;;
+    esac
+done
+
+UPDATE_CALLS="$WORK_DIR/update-calls.log"
+UPDATE_DIR=""
+UPDATE_OUT=""
+UPDATE_STATUS=0
+UPDATE_CASE=0
+UPDATE_TAG_FAILS="false"
+
+make_update_fixture() {
+    local image="${2:-ghcr.io/free-guy-ir/node}"
+    UPDATE_CASE=$((UPDATE_CASE + 1))
+    UPDATE_DIR="$WORK_DIR/update-$UPDATE_CASE"
+    mkdir -p "$UPDATE_DIR/app" "$UPDATE_DIR/data/certs" "$UPDATE_DIR/before"
+    cat > "$UPDATE_DIR/app/docker-compose.yml" <<EOF
+services:
+  node:
+    container_name: node
+    image: $image:$1
+    restart: always
+    network_mode: host
+    env_file: .env
+EOF
+    printf 'SERVICE_PORT= 62050\nAPI_KEY= 11111111-2222-4333-8444-555555555555\nAPI_PORT= 62051\n' > "$UPDATE_DIR/app/.env"
+    printf 'CERT\n' > "$UPDATE_DIR/data/certs/ssl_cert.pem"
+    printf 'KEY\n' > "$UPDATE_DIR/data/certs/ssl_key.pem"
+    cp "$UPDATE_DIR/app/docker-compose.yml" "$UPDATE_DIR/app/.env" "$UPDATE_DIR/data/certs/ssl_cert.pem" \
+        "$UPDATE_DIR/data/certs/ssl_key.pem" "$UPDATE_DIR/before/"
+}
+
+run_update_command() {
+    : > "$UPDATE_CALLS"
+    if UPDATE_OUT=$(
+        APP_DIR="$UPDATE_DIR/app"
+        DATA_DIR="$UPDATE_DIR/data"
+        COMPOSE_FILE="$APP_DIR/docker-compose.yml"
+        ENV_FILE="$APP_DIR/.env"
+        check_running_as_root() { :; }
+        detect_os() { :; }
+        install_package() { :; }
+        install_yq() { :; }
+        detect_compose() { COMPOSE="fake_compose"; }
+        fake_compose() { echo "compose $*" >> "$UPDATE_CALLS"; }
+        ensure_docker_service_running() { :; }
+        update_node_script() { echo "update_node_script" >> "$UPDATE_CALLS"; }
+        uninstall_completion() { :; }
+        install_completion() { :; }
+        update_service_if_installed() { echo "update_service_if_installed" >> "$UPDATE_CALLS"; }
+        curl() { echo "curl $*" >> "$UPDATE_CALLS"; release_api_reply "$@"; }
+        if [ "$UPDATE_TAG_FAILS" = "true" ]; then
+            set_node_image_tag() { return 1; }
+        fi
+        update_command "$@" 2>&1
+    ); then
+        UPDATE_STATUS=0
+    else
+        UPDATE_STATUS=$?
+    fi
+}
+
+fixture_image() {
+    sed -n 's/^    image: //p' "$UPDATE_DIR/app/docker-compose.yml"
+}
+
+fixture_unchanged() {
+    cmp -s "$UPDATE_DIR/before/$(basename "$1")" "$1"
+}
+
+assert_secrets_unchanged() {
+    assert_true "$1: .env unchanged" fixture_unchanged "$UPDATE_DIR/app/.env"
+    assert_true "$1: ssl_cert.pem unchanged" fixture_unchanged "$UPDATE_DIR/data/certs/ssl_cert.pem"
+    assert_true "$1: ssl_key.pem unchanged" fixture_unchanged "$UPDATE_DIR/data/certs/ssl_key.pem"
+}
+
+assert_update_refused() {
+    assert_eq "$UPDATE_STATUS" "1" "$1: exits 1"
+    assert_true "$1: compose file unchanged" fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+    assert_false "$1: no script update" grep -q "^update_node_script$" "$UPDATE_CALLS"
+    assert_false "$1: no image pull" grep -q " pull$" "$UPDATE_CALLS"
+}
+
+make_update_fixture "latest"
+run_update_command
+assert_eq "$UPDATE_STATUS" "0" "update: exits 0"
+assert_true "update: compose file byte-identical" fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+assert_false "update: no release lookup" grep -q "^curl " "$UPDATE_CALLS"
+assert_true "update: pulls images" grep -q " pull$" "$UPDATE_CALLS"
+assert_true "update: updates node-serviced" grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
+assert_secrets_unchanged "update"
+
+make_update_fixture "v0.8.20-degraded-start"
+printf 'services:\n  node:\n    image: ghcr.io/free-guy-ir/node:v0.8.20-degraded-start\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
+run_update_command --no-update-service
+assert_eq "$UPDATE_STATUS" "0" "update --no-update-service (what node-serviced runs) with a pinning override: exits 0"
+assert_true "update --no-update-service with a pinning override: compose file byte-identical" \
+    fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+assert_true "update --no-update-service with a pinning override: pulls images" grep -q " pull$" "$UPDATE_CALLS"
+assert_false "update --no-update-service with a pinning override: skips node-serviced" \
+    grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
+assert_secrets_unchanged "update --no-update-service with a pinning override"
+
+make_update_fixture "dev"
+run_update_command --no-update-service
+assert_eq "$UPDATE_STATUS" "0" "update --no-update-service on dev: exits 0"
+assert_true "update --no-update-service on dev: compose file byte-identical (dev stays dev)" \
+    fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+
+for update_conflict in "--dev --version v1.2.3" "--version v1.2.3 --dev" "--no-update-service -v v1.2.3 --dev" "--dev --dev"; do
+    make_update_fixture "latest"
+    # shellcheck disable=SC2086
+    run_update_command $update_conflict
+    assert_update_refused "update $update_conflict"
+    if [[ "$UPDATE_OUT" == *"Cannot use --dev and --version options simultaneously."* ]]; then
+        pass "update $update_conflict: names both exclusive options"
+    else
+        fail "update $update_conflict: names both exclusive options (got: $UPDATE_OUT)"
+    fi
+done
+
+make_update_fixture "latest"
+run_update_command --version
+assert_update_refused "update --version (no value)"
+
+for bad_version in 1.2 "v1.2.3+build.5" "v0.8.20-degraded start"; do
+    make_update_fixture "latest"
+    run_update_command --version "$bad_version"
+    assert_update_refused "update --version $bad_version"
+done
+
+make_update_fixture "dev"
+run_update_command --version v9.9.99
+assert_update_refused "update --version v9.9.99 (no such release)"
+assert_true "update --version v9.9.99: checked releases/tags/v9.9.99" \
+    grep -q "Free-Guy-IR/node/releases/tags/v9.9.99" "$UPDATE_CALLS"
+
+for api_mode in empty ratelimit; do
+    make_update_fixture "latest"
+    RELEASE_API_MODE="$api_mode"
+    run_update_command --version pre-release
+    RELEASE_API_MODE="normal"
+    assert_update_refused "update --version pre-release, GitHub $api_mode"
+done
+
+make_update_fixture "latest"
+UPDATE_TAG_FAILS="true"
+run_update_command --dev
+UPDATE_TAG_FAILS="false"
+assert_eq "$UPDATE_STATUS" "1" "update --dev with a failing tag rewrite: exits 1"
+assert_false "update --dev with a failing tag rewrite: no image pull" grep -q " pull$" "$UPDATE_CALLS"
+assert_false "update --dev with a failing tag rewrite: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+
+if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefarah"; then
+    make_update_fixture "latest"
+    run_update_command --dev
+    assert_eq "$UPDATE_STATUS" "0" "update --dev: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:dev" "update --dev: image becomes ghcr.io/free-guy-ir/node:dev"
+    assert_false "update --dev: no release lookup" grep -q "^curl " "$UPDATE_CALLS"
+    assert_true "update --dev: pulls images" grep -q " pull$" "$UPDATE_CALLS"
+    assert_true "update --dev: updates node-serviced" grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
+    if [[ "$UPDATE_OUT" == *"ghcr.io/free-guy-ir/node:dev is an unreleased"* ]]; then
+        pass "update --dev: prints the unreleased build note with the compose image"
+    else
+        fail "update --dev: prints the unreleased build note with the compose image (got: $UPDATE_OUT)"
+    fi
+    assert_secrets_unchanged "update --dev"
+
+    make_update_fixture "v0.5.4" "mirror.example.com:5000/team/node"
+    run_update_command --dev
+    assert_eq "$(fixture_image)" "mirror.example.com:5000/team/node:dev" "update --dev on a mirror image: keeps the registry"
+    if [[ "$UPDATE_OUT" == *"mirror.example.com:5000/team/node:dev is an unreleased"* && "$UPDATE_OUT" != *"pasarguard/node:dev"* ]]; then
+        pass "update --dev on a mirror image: the note names the image that will run"
+    else
+        fail "update --dev on a mirror image: the note names the image that will run (got: $UPDATE_OUT)"
+    fi
+
+    make_update_fixture "dev"
+    run_update_command --version v0.8.20-degraded-start --no-update-service
+    assert_eq "$UPDATE_STATUS" "0" "update --version v0.8.20-degraded-start: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start" \
+        "update --version v0.8.20-degraded-start: image becomes the suffixed fork tag"
+    assert_true "update --version v0.8.20-degraded-start: checked the fork release" \
+        grep -q "Free-Guy-IR/node/releases/tags/v0.8.20-degraded-start" "$UPDATE_CALLS"
+    assert_false "update --version v0.8.20-degraded-start --no-update-service: skips node-serviced" \
+        grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
+    assert_secrets_unchanged "update --version v0.8.20-degraded-start"
+
+    make_update_fixture "dev"
+    run_update_command --version latest
+    assert_eq "$UPDATE_STATUS" "0" "update --version latest: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:latest" "update --version latest: image becomes :latest"
+
+    make_update_fixture "latest"
+    RELEASE_API_MODE="fork_suffixed"
+    run_update_command --version pre-release
+    RELEASE_API_MODE="normal"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start" \
+        "update --version pre-release: pins the newest fork release tag"
+
+    for pin_file in docker-compose.override.yml compose.override.yaml; do
+        make_update_fixture "v0.8.20-degraded-start"
+        printf 'services:\n  node:\n    image: ghcr.io/free-guy-ir/node:v0.8.20-degraded-start\n' > "$UPDATE_DIR/app/$pin_file"
+        run_update_command --dev
+        assert_update_refused "update --dev with $pin_file pinning the image"
+        if [[ "$UPDATE_OUT" == *"$pin_file pins the node image to ghcr.io/free-guy-ir/node:v0.8.20-degraded-start"* ]]; then
+            pass "update --dev with $pin_file pinning the image: names the file and the pinned image"
+        else
+            fail "update --dev with $pin_file pinning the image: names the file and the pinned image (got: $UPDATE_OUT)"
+        fi
+    done
+
+    make_update_fixture "dev"
+    printf 'services:\n  node:\n    image: ghcr.io/free-guy-ir/node:dev\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
+    run_update_command --version v0.8.20-degraded-start
+    assert_update_refused "update --version with an override pinning the image"
+
+    make_update_fixture "latest"
+    printf 'services:\n  node:\n    devices:\n      - /dev/ppp\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
+    run_update_command --dev
+    assert_eq "$UPDATE_STATUS" "0" "update --dev with an override that pins no image: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:dev" "update --dev with an override that pins no image: switches"
+
+    make_update_fixture "latest"
+    printf 'services: [unclosed\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
+    run_update_command --dev
+    assert_update_refused "update --dev with an unreadable override"
+else
+    echo "(skipped update tag rewrites: mikefarah yq v4 not available)"
+fi
+
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

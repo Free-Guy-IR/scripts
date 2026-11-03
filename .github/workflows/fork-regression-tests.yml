@@ -83,6 +83,9 @@ jobs:
       - name: node-serviced rollbacks keep concurrent .env edits
         run: bash tests/run_isolated.sh tests/test_node_service_env_interleaving.sh
 
+      - name: pg-node update --dev and --version switch the image under the .env lock
+        run: bash tests/run_isolated.sh tests/test_node_image_switch_interleaving.sh
+
       - name: Every .env write in pg-node.sh holds the .env lock
         run: bash tests/run_isolated.sh tests/test_env_writes_hold_lock.sh
 

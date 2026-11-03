@@ -3,7 +3,8 @@
 Upstream is `PasarGuard/scripts`. The fork last merged upstream `main` at `bba95f2` (2026-10-10, #35, #36 and #37).
 Since then it has squash-ported #42 (`21f64e4`, release v0.1.10) as 9cd2d22, whose
 `tests/unit_compose_templates.sh` is copied without upstream's comments, and #45 (`ffc9df4`, release v0.1.11) with
-the restore change described under "MySQL and MariaDB buffer pool size".
+the restore change described under "MySQL and MariaDB buffer pool size", and #41 (`4d481a8`, release v0.1.10)
+with the changes described under "pg-node `--dev` and image switching on update".
 
 `parity/ledger.tsv` holds a decision for every upstream item the fork has not merged: single commits, other
 branches, release tags, and open pull requests. Each decision is pinned to that item's current SHA. A `deferred`
@@ -221,6 +222,39 @@ install without the variable drops the destination's size back to 256M.
   recovered MySQL or MariaDB runs with. `.github/workflows/backup-restore.yml` runs that roundtrip for a MySQL
   `--fresh` that stops and is continued, too.
 
+## pg-node `--dev` and image switching on update (upstream #41, release v0.1.10)
+
+Upstream #41 adds `pg-node install --dev`, `pg-node update --dev` and `pg-node update --version`, which rewrite the
+node image tag in `docker-compose.yml`, and four fixes to how a tag is resolved and written. The port is upstream's
+code, tests and docs without upstream's code comments, with these changes:
+
+- Releases and images are the fork's. `check_node_version_exists` asks the GitHub releases of `Free-Guy-IR/node`,
+  and the dev image is `ghcr.io/free-guy-ir/node:dev`, which the fork's node workflow `docker-build-dev.yml` builds
+  from its `dev` branch.
+- `--version` accepts the fork's suffixed release tags, such as `v0.8.20-degraded-start`, which production nodes
+  run. One pattern checks both the requested and the resolved tag: `vX.Y.Z` with an optional `-suffix` of letters,
+  digits, dots and hyphens, at most 128 characters. Upstream accepts only `vX.Y.Z` as input. The fork's earlier
+  install pattern also accepted `+build` metadata, which is not a valid Docker tag; such a tag is now refused
+  before any lookup.
+- `update --dev` and `update --version` rewrite the image while holding the `.env` lock, as `core-update` and
+  `geofiles` do when they edit the compose file, and `install` sets the tag before it releases that lock instead of
+  after. Upstream has no such lock. When the lock stays held past `NODE_ENV_LOCK_WAIT_SECONDS` (30 seconds by
+  default), the update stops before the pull and says the image was not switched.
+- When a compose override file sets `services.node.image`, `update --dev`, `update --version`, and `install` with
+  `--dev`, `--version` or `--pre-release` stop before any change, because Compose would keep running the pinned
+  image. An override that yq cannot read stops them, too. A plain `install` and a plain `update` are unchanged and
+  keep the existing notice.
+- `print_dev_image_note` names the image that `docker-compose.yml` holds after the switch, instead of upstream's
+  fixed `pasarguard/node:dev`, so a mirror or the fork's registry is named correctly; `install --dev` prints it after
+  the compose file is written.
+- node-serviced runs `pg-node update --no-update-service` from the fork's `main` after a panel-triggered update.
+  That path parses no new option, runs no release lookup and leaves `docker-compose.yml` byte-identical, also when
+  an override pins the image.
+- Tests: upstream's cases in `tests/unit_pgnode.sh` with the fork's names, plus suffixed, `+build` and over-long
+  tags, the override cases and the mirror note. `tests/test_node_image_switch_interleaving.sh` runs a switch
+  against a writer that holds the lock across a compose read-modify-write, against a lock held past the wait, and
+  two switches at once.
+
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 
 **Status:** open and unmerged upstream. The fork ported its net diff from head `fad1f66` as 5f61243.
@@ -281,6 +315,7 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_restore_keeps_destination_override.sh`
 - `test_pgbouncer_console_read_only.sh`
 - `test_restore_keeps_host_buffer_pool.sh`
+- `test_node_image_switch_interleaving.sh`
 - `test_run_isolated.sh`
 
 Every test step of `fork-regression-tests.yml`, `upstream-parity.yml` and `pgbouncer-prepared-statements.yml`,

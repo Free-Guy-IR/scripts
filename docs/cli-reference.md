@@ -203,8 +203,9 @@ pg-node [command] [options]
 Installs or re-installs a worker node instance.
 
 **Options:**
-- `-v`, `--version <VERSION>`: Install specific node image version.
+- `-v`, `--version <VERSION>`: Install specific node image version: a release tag of `Free-Guy-IR/node` such as `v0.8.20-degraded-start`, or `latest`.
 - `--pre-release`: Install latest pre-release image.
+- `--dev`: Install the `ghcr.io/free-guy-ir/node:dev` image, built from the node `dev` branch. Unreleased, for testing only; `pg-node update` pulls the newest dev build. Cannot be combined with `--version` or `--pre-release`. To move an existing node to it, use `update --dev` instead.
 - `--name <NAME>`: Custom instance name (creates `/opt/<NAME>` and `/var/lib/<NAME>`).
 - `--override`: Force overwrite existing node instance.
 - `--api-key <KEY>`: Pre-configure API authentication key.
@@ -237,6 +238,25 @@ sudo pg-node status
 Streams real-time container logs.
 ```bash
 sudo pg-node logs
+```
+
+#### `update`
+Updates the `pg-node` script, pulls the node image and recreates the container. The image tag in `docker-compose.yml` is kept, so a node on `dev` stays on `dev`. Update never changes `.env`, the API key or the certificates.
+
+**Options:**
+- `--dev`: Switch the node to the `dev` tag of the image in `docker-compose.yml` (`ghcr.io/free-guy-ir/node:dev` on a default install), built from the node `dev` branch (unreleased, for testing).
+- `-v`, `--version <VERSION>`: Switch the node to a release tag of `Free-Guy-IR/node` (`vX.Y.Z` or a suffixed fork tag such as `v0.8.20-degraded-start`), `latest` (the `latest` image tag) or `pre-release` (pins the newest release tag, pre-releases included). Checked against the GitHub releases the same way as `install --version`; if that lookup fails, `pre-release` is refused before anything changes.
+- `--no-update-service`: Do not update the companion node-serviced daemon.
+
+`--dev` and `--version` cannot be combined. The line `Switching node image to: dev` (or the chosen tag) shows that the switch was applied. The tag is rewritten while holding the `.env` lock, so it cannot interleave with `core-update` or `geofiles`, which edit the same compose file.
+
+When a compose override file next to `docker-compose.yml` sets `services.node.image`, `update --dev`, `update --version` and `install` with `--dev`, `--version` or `--pre-release` stop before any change, because Compose would keep running the pinned image. Remove that line from the override first.
+
+On a node installed before these options existed, the installed script ignores them on its first run. Run `sudo pg-node update` once (it also updates the script itself), then `sudo pg-node update --dev`.
+
+```bash
+sudo pg-node update --dev
+sudo pg-node update --version latest
 ```
 
 #### `core-update`
