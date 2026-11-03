@@ -864,18 +864,28 @@ services:
 YML
 
 assert_false "compose_has_device: absent on a fresh compose" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
-APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/ppp:/dev/ppp" node
+APP_DIR="$DEV_APP_DIR" ENV_FILE="$DEV_APP_DIR/.env" compose_add_device "/dev/ppp:/dev/ppp" node
 assert_true  "compose_add_device: ppp device added" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
-APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/ppp:/dev/ppp" node
+APP_DIR="$DEV_APP_DIR" ENV_FILE="$DEV_APP_DIR/.env" compose_add_device "/dev/ppp:/dev/ppp" node
 assert_eq "$(yq eval -r '.services.node.devices | length' "$DEV_APP_DIR/docker-compose.yml")" "1" "compose_add_device: idempotent, no duplicate"
-APP_DIR="$DEV_APP_DIR" compose_add_device "/dev/net/tun:/dev/net/tun" node
+APP_DIR="$DEV_APP_DIR" ENV_FILE="$DEV_APP_DIR/.env" compose_add_device "/dev/net/tun:/dev/net/tun" node
 assert_eq "$(yq eval -r '.services.node.devices | length' "$DEV_APP_DIR/docker-compose.yml")" "2" "compose_add_device: second device appended"
 assert_eq "$(yq eval -r '.services.node.cap_add[0]' "$DEV_APP_DIR/docker-compose.yml")" "NET_ADMIN" "compose_add_device: untouched keys survive"
-APP_DIR="$DEV_APP_DIR" compose_remove_device "/dev/ppp:/dev/ppp" node
+APP_DIR="$DEV_APP_DIR" ENV_FILE="$DEV_APP_DIR/.env" compose_remove_device "/dev/ppp:/dev/ppp" node
 assert_false "compose_remove_device: ppp device gone" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/ppp:/dev/ppp"
 assert_true  "compose_remove_device: other device kept" compose_has_device "$DEV_APP_DIR/docker-compose.yml" node "/dev/net/tun:/dev/net/tun"
-APP_DIR="$DEV_APP_DIR" compose_remove_device "/dev/ppp:/dev/ppp" node
+APP_DIR="$DEV_APP_DIR" ENV_FILE="$DEV_APP_DIR/.env" compose_remove_device "/dev/ppp:/dev/ppp" node
 assert_eq "$?" "0" "compose_remove_device: removing an absent device is not an error"
+nested_lock_state=$(
+    APP_DIR="$DEV_APP_DIR"
+    ENV_FILE="$DEV_APP_DIR/.env"
+    acquire_node_env_lock
+    compose_add_device "/dev/ppp:/dev/ppp" node
+    compose_remove_device "/dev/ppp:/dev/ppp" node
+    echo "$NODE_ENV_LOCK_HELD"
+    release_node_env_lock
+)
+assert_eq "$nested_lock_state" "true" "compose_add_device/compose_remove_device under a held .env lock keep the caller's lock"
 assert_false "compose_add_device: fails cleanly without a compose file" env APP_DIR="$WORK_DIR/nowhere" bash -c 'source "$0"; compose_add_device "/dev/ppp:/dev/ppp" node' "$ROOT_DIR/pg-node.sh"
 
 PERSIST_FILE="$WORK_DIR/persist.conf"
@@ -1002,10 +1012,10 @@ if [[ "$INSTALL_OUT" == *"unreleased"* ]]; then
 else
     fail "install --dev: prints the unreleased build note"
 fi
-if [[ "$INSTALL_OUT" == *"ghcr.io/free-guy-ir/node:dev is an unreleased"* && "$INSTALL_OUT" != *"pasarguard/node:dev"* ]]; then
-    pass "install --dev: the note names the fork image, not pasarguard/node:dev"
+if [[ "$INSTALL_OUT" == *"ghcr.io/free-guy-ir/node:main is an unreleased"* && "$INSTALL_OUT" != *":dev"* ]]; then
+    pass "install --dev: the note names the fork's main image, not a dev tag"
 else
-    fail "install --dev: the note names the fork image, not pasarguard/node:dev (got: $INSTALL_OUT)"
+    fail "install --dev: the note names the fork's main image, not a dev tag (got: $INSTALL_OUT)"
 fi
 
 for dev_conflict in "--dev --version v1.2.3" "--version v1.2.3 --dev" "--dev --pre-release" "--pre-release --dev" "-v v1.2.3 --dev"; do
@@ -1146,32 +1156,106 @@ else
     echo "(skipped set_node_image_tag and override checks: mikefarah yq v4 not available)"
 fi
 
-INSTALL_TAG_CALLS="$WORK_DIR/install-tag-calls.log"
-for tag_case in "dev fail" "v1.2.3 fail" "dev ok" "latest fail"; do
-    read -r tag_version tag_result <<<"$tag_case"
-    : > "$INSTALL_TAG_CALLS"
-    if tag_out=$(
-        set_node_image_tag() { echo "set_node_image_tag $1" >> "$INSTALL_TAG_CALLS"; [ "$tag_result" = "ok" ]; }
-        set_install_image_tag "$tag_version" "$WORK_DIR/unused-compose.yml" 2>&1
+STAGE_CALLS="$WORK_DIR/stage-image-calls.log"
+for stage_case in "dev tag" "v1.2.3 pull" "dev none" "latest tag"; do
+    read -r stage_version stage_failure <<<"$stage_case"
+    : > "$STAGE_CALLS"
+    if stage_out=$(
+        set_node_image_tag() { echo "tag $1" >> "$STAGE_CALLS"; [ "$stage_failure" != "tag" ]; }
+        node_compose_image() { echo "ghcr.io/free-guy-ir/node:staged"; }
+        pull_node_image() { echo "pull $1" >> "$STAGE_CALLS"; [ "$stage_failure" != "pull" ]; }
+        stage_install_image "$stage_version" "$WORK_DIR/unused-compose.yml" 2>&1
     ); then
-        tag_status=0
+        stage_status=0
     else
-        tag_status=$?
+        stage_status=$?
     fi
-    case "$tag_case" in
-        "latest fail")
-            assert_eq "$tag_status" "0" "set_install_image_tag latest: exits 0"
-            assert_false "set_install_image_tag latest: no rewrite" test -s "$INSTALL_TAG_CALLS"
+    case "$stage_case" in
+        "latest tag")
+            assert_eq "$stage_status" "0" "stage_install_image latest: exits 0"
+            assert_false "stage_install_image latest: no rewrite and no pull" test -s "$STAGE_CALLS"
             ;;
-        *fail)
-            assert_eq "$tag_status" "1" "set_install_image_tag $tag_version, rewrite fails: exits 1"
-            assert_true "set_install_image_tag $tag_version, rewrite fails: names the tag and mikefarah yq v4" \
-                grep -q "${tag_version}.*mikefarah yq v4" <<<"$tag_out"
+        "dev tag")
+            assert_eq "$stage_status" "1" "stage_install_image dev, rewrite fails: exits 1"
+            assert_true "stage_install_image dev, rewrite fails: writes the main tag" grep -qx "tag main" "$STAGE_CALLS"
+            assert_false "stage_install_image dev, rewrite fails: no pull" grep -q "^pull" "$STAGE_CALLS"
+            assert_true "stage_install_image dev, rewrite fails: names mikefarah yq v4 and that nothing changed" \
+                grep -q "main.*mikefarah yq v4.*were not changed" <<<"$stage_out"
             ;;
-        *ok)
-            assert_eq "$tag_status" "0" "set_install_image_tag $tag_version, rewrite ok: exits 0"
+        "v1.2.3 pull")
+            assert_eq "$stage_status" "1" "stage_install_image v1.2.3, pull fails: exits 1"
+            assert_true "stage_install_image v1.2.3, pull fails: pulled the staged image" \
+                grep -qx "pull ghcr.io/free-guy-ir/node:staged" "$STAGE_CALLS"
+            assert_true "stage_install_image v1.2.3, pull fails: says nothing changed" \
+                grep -q "Could not pull ghcr.io/free-guy-ir/node:staged; the certificate, .env and compose file were not changed" <<<"$stage_out"
+            ;;
+        "dev none")
+            assert_eq "$stage_status" "0" "stage_install_image dev: exits 0"
+            assert_true "stage_install_image dev: rewrites to main, then pulls" \
+                test "$(tr '\n' ' ' < "$STAGE_CALLS")" = "tag main pull ghcr.io/free-guy-ir/node:staged "
             ;;
     esac
+done
+
+INSTALL_NODE_CALLS="$WORK_DIR/install-node-calls.log"
+for stage_case in "dev tag" "v1.2.3 pull" "dev none" "latest none"; do
+    read -r stage_version stage_failure <<<"$stage_case"
+    stage_root="$WORK_DIR/install-node-$stage_version-$stage_failure"
+    mkdir -p "$stage_root"
+    : > "$INSTALL_NODE_CALLS"
+    if stage_out=$(
+        APP_NAME="pg-node"
+        APP_DIR="$stage_root/app"
+        DATA_DIR="$stage_root/data"
+        ENV_FILE="$APP_DIR/.env"
+        COMPOSE_FILE="$APP_DIR/docker-compose.yml"
+        SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
+        SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
+        AUTO_CONFIRM=true
+        INSTALL_API_KEY="00000000-0000-4000-8000-000000000000"
+        INSTALL_USE_REST=false
+        INSTALL_SERVICE_PORT=62050
+        get_occupied_ports() { :; }
+        is_port_occupied() { return 1; }
+        stage_node_install_certificate() { : > "$1/ssl_cert.pem"; : > "$1/ssl_key.pem"; }
+        curl() {
+            local out=""
+            while [ "$#" -gt 0 ]; do
+                [ "$1" = "-o" ] && out="$2"
+                shift
+            done
+            printf 'services:\n  node:\n    image: ghcr.io/free-guy-ir/node:latest\n' > "$out"
+        }
+        set_node_image_tag() { echo "tag $1" >> "$INSTALL_NODE_CALLS"; [ "$stage_failure" != "tag" ]; }
+        node_compose_image() { echo "ghcr.io/free-guy-ir/node:staged"; }
+        pull_node_image() { echo "pull $1" >> "$INSTALL_NODE_CALLS"; [ "$stage_failure" != "pull" ]; }
+        acquire_node_env_lock() { echo "lock" >> "$INSTALL_NODE_CALLS"; return 1; }
+        install_node "$stage_version" 2>&1
+    ); then
+        stage_status=0
+    else
+        stage_status=$?
+    fi
+    assert_eq "$stage_status" "1" "install_node $stage_case: stops (the lock stub refuses when reached)"
+    case "$stage_failure" in
+        tag | pull)
+            assert_false "install_node $stage_version, staged $stage_failure fails: never takes the lock" \
+                grep -qx "lock" "$INSTALL_NODE_CALLS"
+            assert_false "install_node $stage_version, staged $stage_failure fails: no .env" test -e "$stage_root/app/.env"
+            assert_false "install_node $stage_version, staged $stage_failure fails: no compose file" \
+                test -e "$stage_root/app/docker-compose.yml"
+            assert_false "install_node $stage_version, staged $stage_failure fails: no certificate" \
+                test -e "$stage_root/data/certs/ssl_cert.pem"
+            ;;
+        none)
+            assert_true "install_node $stage_version: stages the image, then takes the lock" grep -qx "lock" "$INSTALL_NODE_CALLS"
+            ;;
+    esac
+    if [ "$stage_version" = "latest" ]; then
+        assert_false "install_node latest: no tag rewrite and no pull" grep -q "^tag\|^pull" "$INSTALL_NODE_CALLS"
+    fi
+    assert_false "install_node $stage_case: staging directory removed" \
+        bash -c "ls -A '$stage_root/data' 2>/dev/null | grep -q '^.install.staged'"
 done
 
 UPDATE_CALLS="$WORK_DIR/update-calls.log"
@@ -1180,6 +1264,8 @@ UPDATE_OUT=""
 UPDATE_STATUS=0
 UPDATE_CASE=0
 UPDATE_TAG_FAILS="false"
+DOCKER_PULL_FAILS="false"
+COMPOSE_PULL_FAILS="false"
 
 make_update_fixture() {
     local image="${2:-ghcr.io/free-guy-ir/node}"
@@ -1202,6 +1288,7 @@ EOF
         "$UPDATE_DIR/data/certs/ssl_key.pem" "$UPDATE_DIR/before/"
 }
 
+# shellcheck disable=SC2317
 run_update_command() {
     : > "$UPDATE_CALLS"
     if UPDATE_OUT=$(
@@ -1214,7 +1301,8 @@ run_update_command() {
         install_package() { :; }
         install_yq() { :; }
         detect_compose() { COMPOSE="fake_compose"; }
-        fake_compose() { echo "compose $*" >> "$UPDATE_CALLS"; }
+        fake_compose() { echo "compose $*" >> "$UPDATE_CALLS"; [ "$COMPOSE_PULL_FAILS" != "true" ] || [ "${*: -1}" != "pull" ]; }
+        docker() { echo "docker $*" >> "$UPDATE_CALLS"; [ "$DOCKER_PULL_FAILS" != "true" ]; }
         ensure_docker_service_running() { :; }
         update_node_script() { echo "update_node_script" >> "$UPDATE_CALLS"; }
         uninstall_completion() { :; }
@@ -1322,16 +1410,23 @@ UPDATE_TAG_FAILS="false"
 assert_eq "$UPDATE_STATUS" "1" "update --dev with a failing tag rewrite: exits 1"
 assert_false "update --dev with a failing tag rewrite: no image pull" grep -q " pull$" "$UPDATE_CALLS"
 assert_false "update --dev with a failing tag rewrite: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+assert_true "update --dev with a failing tag rewrite: compose file byte-identical" \
+    fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
 
 if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefarah"; then
     make_update_fixture "latest"
     run_update_command --dev
     assert_eq "$UPDATE_STATUS" "0" "update --dev: exits 0"
-    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:dev" "update --dev: image becomes ghcr.io/free-guy-ir/node:dev"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:main" "update --dev: image becomes ghcr.io/free-guy-ir/node:main"
     assert_false "update --dev: no release lookup" grep -q "^curl " "$UPDATE_CALLS"
     assert_true "update --dev: pulls images" grep -q " pull$" "$UPDATE_CALLS"
+    assert_true "update --dev: pulled ghcr.io/free-guy-ir/node:main before the switch" \
+        grep -qx "docker pull ghcr.io/free-guy-ir/node:main" "$UPDATE_CALLS"
+    assert_true "update --dev: the pre-switch pull comes before the script update" \
+        test "$(grep -n -m1 '^docker pull ' "$UPDATE_CALLS" | cut -d: -f1)" -lt "$(grep -n -m1 '^update_node_script$' "$UPDATE_CALLS" | cut -d: -f1)"
     assert_true "update --dev: updates node-serviced" grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
-    if [[ "$UPDATE_OUT" == *"ghcr.io/free-guy-ir/node:dev is an unreleased"* ]]; then
+    assert_false "update --dev: no switch backup left behind" bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+    if [[ "$UPDATE_OUT" == *"ghcr.io/free-guy-ir/node:main is an unreleased"* ]]; then
         pass "update --dev: prints the unreleased build note with the compose image"
     else
         fail "update --dev: prints the unreleased build note with the compose image (got: $UPDATE_OUT)"
@@ -1340,8 +1435,8 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
 
     make_update_fixture "v0.5.4" "mirror.example.com:5000/team/node"
     run_update_command --dev
-    assert_eq "$(fixture_image)" "mirror.example.com:5000/team/node:dev" "update --dev on a mirror image: keeps the registry"
-    if [[ "$UPDATE_OUT" == *"mirror.example.com:5000/team/node:dev is an unreleased"* && "$UPDATE_OUT" != *"pasarguard/node:dev"* ]]; then
+    assert_eq "$(fixture_image)" "mirror.example.com:5000/team/node:main" "update --dev on a mirror image: keeps the registry"
+    if [[ "$UPDATE_OUT" == *"mirror.example.com:5000/team/node:main is an unreleased"* && "$UPDATE_OUT" != *"pasarguard/node:dev"* ]]; then
         pass "update --dev on a mirror image: the note names the image that will run"
     else
         fail "update --dev on a mirror image: the note names the image that will run (got: $UPDATE_OUT)"
@@ -1391,12 +1486,126 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     printf 'services:\n  node:\n    devices:\n      - /dev/ppp\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
     run_update_command --dev
     assert_eq "$UPDATE_STATUS" "0" "update --dev with an override that pins no image: exits 0"
-    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:dev" "update --dev with an override that pins no image: switches"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:main" "update --dev with an override that pins no image: switches"
 
     make_update_fixture "latest"
     printf 'services: [unclosed\n' > "$UPDATE_DIR/app/docker-compose.override.yml"
     run_update_command --dev
     assert_update_refused "update --dev with an unreadable override"
+
+    for dev_args in "--no-update-service --dev" "--dev --no-update-service"; do
+        make_update_fixture "latest"
+        # shellcheck disable=SC2086
+        run_update_command $dev_args
+        assert_eq "$UPDATE_STATUS" "0" "update $dev_args: exits 0"
+        assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:main" "update $dev_args: image becomes ghcr.io/free-guy-ir/node:main"
+        assert_false "update $dev_args: skips node-serviced" grep -q "^update_service_if_installed$" "$UPDATE_CALLS"
+    done
+
+    make_update_fixture "dev"
+    run_update_command --version v1.2.3
+    assert_eq "$UPDATE_STATUS" "0" "update --version v1.2.3: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:v1.2.3" "update --version v1.2.3: image becomes ghcr.io/free-guy-ir/node:v1.2.3"
+    assert_true "update --version v1.2.3: checked releases/tags/v1.2.3" \
+        grep -q "Free-Guy-IR/node/releases/tags/v1.2.3" "$UPDATE_CALLS"
+    assert_true "update --version v1.2.3: pulls images" grep -q " pull$" "$UPDATE_CALLS"
+    assert_secrets_unchanged "update --version v1.2.3"
+
+    make_update_fixture "dev"
+    run_update_command -v latest --no-update-service
+    assert_eq "$UPDATE_STATUS" "0" "update -v latest: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:latest" "update -v latest: a dev node goes back to ghcr.io/free-guy-ir/node:latest"
+    assert_true "update -v latest: checked releases/latest" grep -q "Free-Guy-IR/node/releases/latest" "$UPDATE_CALLS"
+
+    make_update_fixture "dev"
+    RELEASE_API_MODE="empty"
+    run_update_command --version latest
+    RELEASE_API_MODE="normal"
+    assert_eq "$UPDATE_STATUS" "0" "update --version latest, GitHub unreachable: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:latest" \
+        "update --version latest, GitHub unreachable: image becomes ghcr.io/free-guy-ir/node:latest"
+
+    make_update_fixture "latest"
+    run_update_command --version pre-release
+    assert_eq "$UPDATE_STATUS" "0" "update --version pre-release: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:v9.9.10-beta" \
+        "update --version pre-release: image becomes the newest release tag"
+
+    make_update_fixture "latest"
+    RELEASE_API_MODE="rc_of_stable"
+    run_update_command --version pre-release
+    RELEASE_API_MODE="normal"
+    assert_eq "$UPDATE_STATUS" "0" "update --version pre-release, rc older than stable: exits 0"
+    assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:v9.9.9" \
+        "update --version pre-release, rc older than stable: image becomes the stable release"
+
+    for unpublished_case in "--dev|ghcr.io/free-guy-ir/node:main" "--version v0.8.20-degraded-start|ghcr.io/free-guy-ir/node:v0.8.20-degraded-start"; do
+        unpublished_args="${unpublished_case%%|*}"
+        unpublished_image="${unpublished_case#*|}"
+        make_update_fixture "latest"
+        DOCKER_PULL_FAILS="true"
+        # shellcheck disable=SC2086
+        run_update_command $unpublished_args
+        DOCKER_PULL_FAILS="false"
+        assert_update_refused "update $unpublished_args when $unpublished_image cannot be pulled"
+        assert_true "update $unpublished_args when the pull fails: tried $unpublished_image" \
+            grep -qx "docker pull $unpublished_image" "$UPDATE_CALLS"
+        assert_secrets_unchanged "update $unpublished_args when the pull fails"
+        if [[ "$UPDATE_OUT" == *"Could not pull $unpublished_image"*"was not changed"* ]]; then
+            pass "update $unpublished_args when the pull fails: says the compose file was not changed"
+        else
+            fail "update $unpublished_args when the pull fails: says the compose file was not changed (got: $UPDATE_OUT)"
+        fi
+    done
+
+    make_update_fixture "latest"
+    COMPOSE_PULL_FAILS="true"
+    run_update_command --dev
+    COMPOSE_PULL_FAILS="false"
+    assert_eq "$UPDATE_STATUS" "1" "update --dev when the compose pull fails after the switch: exits 1"
+    assert_true "update --dev when the compose pull fails after the switch: compose file restored byte-identical" \
+        fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+    assert_false "update --dev when the compose pull fails after the switch: container not recreated" \
+        grep -q " up -d" "$UPDATE_CALLS"
+    assert_false "update --dev when the compose pull fails after the switch: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+    assert_false "update --dev when the compose pull fails after the switch: no backup left behind" \
+        bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+    assert_secrets_unchanged "update --dev when the compose pull fails after the switch"
+
+    make_update_fixture "latest"
+    COMPOSE_PULL_FAILS="true"
+    run_update_command --no-update-service
+    COMPOSE_PULL_FAILS="false"
+    assert_true "plain update when the compose pull fails: compose file byte-identical" \
+        fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+    assert_false "plain update: never pulls by itself" grep -q "^docker pull" "$UPDATE_CALLS"
+
+    digest="sha256:$(printf '0%.0s' $(seq 1 64))"
+    for digest_case in "ghcr.io/free-guy-ir/node@${digest}|--dev|ghcr.io/free-guy-ir/node:main" \
+        "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start@${digest}|--version v1.2.3|ghcr.io/free-guy-ir/node:v1.2.3" \
+        "registry.example.com:5000/team/node:latest@${digest}|--dev|registry.example.com:5000/team/node:main"; do
+        IFS='|' read -r digest_before digest_args digest_after <<<"$digest_case"
+        make_update_fixture "latest"
+        yq eval ".services[\"node\"].image = \"$digest_before\"" -i "$UPDATE_DIR/app/docker-compose.yml"
+        # shellcheck disable=SC2086
+        run_update_command $digest_args
+        assert_eq "$UPDATE_STATUS" "0" "update $digest_args on ${digest_before%%@*}@digest: exits 0"
+        assert_eq "$(fixture_image)" "$digest_after" "update $digest_args on ${digest_before%%@*}@digest: image becomes $digest_after"
+        assert_true "update $digest_args on a digest-pinned image: pulled $digest_after first" \
+            grep -qx "docker pull $digest_after" "$UPDATE_CALLS"
+        if [[ "$UPDATE_OUT" == *"digest pin"*"is replaced by the tag"* ]]; then
+            pass "update $digest_args on a digest-pinned image: reports the dropped digest"
+        else
+            fail "update $digest_args on a digest-pinned image: reports the dropped digest (got: $UPDATE_OUT)"
+        fi
+    done
+    for digest_case in "ghcr.io/free-guy-ir/node@${digest}|ghcr.io/free-guy-ir/node:main" \
+        "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start@${digest}|ghcr.io/free-guy-ir/node:main"; do
+        yq eval ".services[\"node\"].image = \"${digest_case%%|*}\"" -i "$image_compose"
+        set_node_image_tag "main" "$image_compose"
+        assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "${digest_case#*|}" \
+            "set_node_image_tag: ${digest_case%%|*} -> ${digest_case#*|}"
+    done
 else
     echo "(skipped update tag rewrites: mikefarah yq v4 not available)"
 fi

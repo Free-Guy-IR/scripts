@@ -228,32 +228,52 @@ Upstream #41 adds `pg-node install --dev`, `pg-node update --dev` and `pg-node u
 node image tag in `docker-compose.yml`, and four fixes to how a tag is resolved and written. The port is upstream's
 code, tests and docs without upstream's code comments, with these changes:
 
-- Releases and images are the fork's. `check_node_version_exists` asks the GitHub releases of `Free-Guy-IR/node`,
-  and the dev image is `ghcr.io/free-guy-ir/node:dev`, which the fork's node workflow `docker-build-dev.yml` builds
-  from its `dev` branch.
+- Releases and images are the fork's. `check_node_version_exists` asks the GitHub releases of `Free-Guy-IR/node`.
+- `--dev` selects the image tag `main`, not `dev`. The fork's node repository has no workflow that publishes a current
+  `dev` image: its `dev` branch is upstream code far behind fork `main`, `ghcr.io/free-guy-ir/node:dev` is a stale
+  build without the fork's changes, and `image-branch.yml` publishes `ghcr.io/free-guy-ir/node:<branch>` for every
+  pushed branch after its tests pass, moving the tag only while the branch still points at the built commit. So
+  `ghcr.io/free-guy-ir/node:main` is the fork's current unreleased build. Upstream's `--dev` selects `pasarguard/node:dev`.
+- `update --dev` and `update --version` pull the target image before any change, and stop with nothing changed when
+  that pull fails, for example for a release whose image was never published. Upstream rewrites the compose file
+  first, so a failed pull leaves it on a tag that cannot be pulled. The rewrite then happens under the `.env` lock
+  and is refused if the image repository in the compose file changed during the pull. If the following
+  `docker compose pull` fails, the compose file is restored byte-identical while it still holds what the switch
+  wrote. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
+  that image before it takes the lock, so a yq failure or a missing image stops it before the certificate, `.env`
+  or compose file change.
+- A digest pin (`image@sha256:...` or `image:tag@sha256:...`) is replaced by the requested tag and reported.
+  Upstream's expression turns it into `image@sha256:dev`, which is not a valid reference. The new image reference is
+  built in the shell and written with `strenv`, so the tag never becomes part of a yq expression.
 - `--version` accepts the fork's suffixed release tags, such as `v0.8.20-degraded-start`, which production nodes
   run. One pattern checks both the requested and the resolved tag: `vX.Y.Z` with an optional `-suffix` of letters,
   digits, dots and hyphens, at most 128 characters. Upstream accepts only `vX.Y.Z` as input. The fork's earlier
   install pattern also accepted `+build` metadata, which is not a valid Docker tag; such a tag is now refused
   before any lookup.
-- `update --dev` and `update --version` rewrite the image while holding the `.env` lock, as `core-update` and
-  `geofiles` do when they edit the compose file, and `install` sets the tag before it releases that lock instead of
-  after. Upstream has no such lock. When the lock stays held past `NODE_ENV_LOCK_WAIT_SECONDS` (30 seconds by
-  default), the update stops before the pull and says the image was not switched.
+- `update --dev` and `update --version` rewrite the image while holding the `.env` lock, which `install` and
+  `core-update` also hold when they write the compose file. The device changes of `l2tp-enable` and `install`
+  (`compose_add_device`, `compose_remove_device`) now take it too, and keep a lock their caller already holds.
+  `geofiles` only reads the compose file. `edit` opens it in an editor without the lock. Upstream has no such lock.
+  When the lock stays held past `NODE_ENV_LOCK_WAIT_SECONDS` (30 seconds by default), the update stops and says the
+  image was not switched.
 - When a compose override file sets `services.node.image`, `update --dev`, `update --version`, and `install` with
   `--dev`, `--version` or `--pre-release` stop before any change, because Compose would keep running the pinned
   image. An override that yq cannot read stops them, too. A plain `install` and a plain `update` are unchanged and
   keep the existing notice.
 - `print_dev_image_note` names the image that `docker-compose.yml` holds after the switch, instead of upstream's
   fixed `pasarguard/node:dev`, so a mirror or the fork's registry is named correctly; `install --dev` prints it after
-  the compose file is written.
+  the compose file is written. The docs say that a pinned tag stops automatic upgrades until
+  `update --version latest`.
 - node-serviced runs `pg-node update --no-update-service` from the fork's `main` after a panel-triggered update.
   That path parses no new option, runs no release lookup and leaves `docker-compose.yml` byte-identical, also when
   an override pins the image.
-- Tests: upstream's cases in `tests/unit_pgnode.sh` with the fork's names, plus suffixed, `+build` and over-long
-  tags, the override cases and the mirror note. `tests/test_node_image_switch_interleaving.sh` runs a switch
-  against a writer that holds the lock across a compose read-modify-write, against a lock held past the wait, and
-  two switches at once.
+- Tests: all of upstream's install and update cases in `tests/unit_pgnode.sh` with the fork's names and `main` for
+  `--dev`, plus suffixed, `+build` and over-long tags, the override cases, the mirror note, a pull that fails before
+  and after the switch, digest pins, and an install whose staged tag or pull fails before the lock.
+  `tests/test_node_image_switch_interleaving.sh` runs a switch against a writer that holds the lock across a compose
+  read-modify-write, against a lock held past the wait, and, with a yq that sleeps between reading and writing the
+  file, a switch concurrent with `compose_add_device` and two concurrent switches; it checks that the slow
+  read-modify-writes never overlap and that no change is lost.
 
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 

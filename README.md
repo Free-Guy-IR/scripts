@@ -137,12 +137,14 @@ sudo bash pg-node.sh install
 # Multi-instance node with custom name
 sudo bash pg-node.sh install --name node-de1 --self-signed
 
-# Testers only: the unreleased ghcr.io/free-guy-ir/node:dev image (built from the node dev branch)
+# Testers only: the unreleased ghcr.io/free-guy-ir/node:main image (built from the node fork's main branch)
 sudo bash pg-node.sh install --dev
 # or switch an installed node to it, and back to the latest release later
 # (a node installed before these options existed: run `sudo pg-node update` once first)
 sudo pg-node update --dev
 sudo pg-node update --version latest
+# A node on a pinned tag (--dev, --version vX.Y.Z or pre-release) stays on it: panel-triggered updates
+# re-pull that same tag. `update --version latest` returns it to automatic upgrades.
 ```
 
 Once installed, manage the node using the global `pg-node` command:

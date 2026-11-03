@@ -2016,23 +2016,66 @@ stage_node_install_certificate() {
     fi
 }
 
+NODE_DEV_IMAGE_TAG="main"
+
+node_image_tag_for() {
+    if [ "$1" = "dev" ]; then
+        printf '%s\n' "$NODE_DEV_IMAGE_TAG"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+node_compose_image() {
+    yq eval -r '.services["node"].image // ""' "$1"
+}
+
+retag_node_image() {
+    local ref="${1%%@*}"
+    if [[ "${ref##*/}" == *:* ]]; then
+        ref="${ref%:*}"
+    fi
+    printf '%s:%s\n' "$ref" "$2"
+}
+
 set_node_image_tag() {
     local tag="$1"
     local compose_file="$2"
-    yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\"(:[^/:]*)?$\"; \":${tag}\"))" -i "$compose_file"
+    local image
+    image=$(node_compose_image "$compose_file") || return 1
+    [ -n "$image" ] || return 1
+    NODE_IMAGE="$(retag_node_image "$image" "$tag")" yq eval '.services["node"].image = strenv(NODE_IMAGE)' -i "$compose_file"
 }
 
-set_install_image_tag() {
+pull_node_image() {
+    docker pull "$1"
+}
+
+report_dropped_image_digest() {
+    if [[ "$1" == *@* ]]; then
+        colorized_echo yellow "  The digest pin in $1 is replaced by the tag ${2}."
+    fi
+}
+
+stage_install_image() {
     local node_version="$1"
     local compose_file="$2"
-    [ "$node_version" = "latest" ] && return 0
-    colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
-    if set_node_image_tag "$node_version" "$compose_file"; then
-        colorized_echo green "  ✓ Docker image version set to: ${node_version}"
-    else
-        colorized_echo red "  ✗ Failed to set the node image tag to ${node_version} (mikefarah yq v4 is required)"
-        exit 1
+    local image_tag image
+    if [ "$node_version" = "latest" ]; then
+        return 0
     fi
+    image_tag=$(node_image_tag_for "$node_version")
+    colorized_echo cyan "  Command: yq eval ...image = ...:${image_tag}..."
+    if ! set_node_image_tag "$image_tag" "$compose_file" || ! image=$(node_compose_image "$compose_file") || [ -z "$image" ]; then
+        colorized_echo red "  ✗ Failed to set the node image tag to ${image_tag} (mikefarah yq v4 is required); the certificate, .env and compose file were not changed."
+        return 1
+    fi
+    colorized_echo cyan "  Command: docker pull $image"
+    if ! pull_node_image "$image"; then
+        colorized_echo red "  ✗ Could not pull $image; the certificate, .env and compose file were not changed."
+        return 1
+    fi
+    colorized_echo green "  ✓ Docker image version set to: ${image_tag}"
 }
 
 node_image_override_pin() {
@@ -2157,6 +2200,9 @@ install_node() {
         colorized_echo red "  ✗ Failed to download node.yml"
         exit 1
     fi
+    if ! stage_install_image "$node_version" "$install_stage/node.yml"; then
+        exit 1
+    fi
     if ! acquire_node_env_lock; then
         colorized_echo red "Could not lock $APP_DIR/.env; the certificate, .env and compose file were not changed."
         exit 1
@@ -2218,7 +2264,6 @@ install_node() {
     ssl_key_env="${container_path}/certs/ssl_key.pem"
     node_env_write sed "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|"
     node_env_write sed "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|"
-    set_install_image_tag "$node_version" "$APP_DIR/docker-compose.yml"
     release_node_env_lock
     rm -rf "$install_stage"
     trap - EXIT
@@ -2320,12 +2365,24 @@ compose_has_device() {
     yq eval -r ".services[\"$service\"].devices // [] | .[]" "$file" 2>/dev/null | grep -qxF "$device"
 }
 
+with_node_env_lock() {
+    local status=0
+    if [ "$NODE_ENV_LOCK_HELD" = true ]; then
+        "$@"
+        return
+    fi
+    acquire_node_env_lock || return 1
+    "$@" || status=$?
+    release_node_env_lock
+    return "$status"
+}
+
 compose_add_device() {
     local device="$1" service="${2:-node}"
     local file="$APP_DIR/docker-compose.yml"
     [ -f "$file" ] || return 1
     compose_has_device "$file" "$service" "$device" && return 0
-    yq eval ".services[\"$service\"].devices = ((.services[\"$service\"].devices // []) + [\"$device\"] | unique)" -i "$file" 2>/dev/null || return 1
+    with_node_env_lock yq eval ".services[\"$service\"].devices = ((.services[\"$service\"].devices // []) + [\"$device\"] | unique)" -i "$file" 2>/dev/null || return 1
     compose_has_device "$file" "$service" "$device"
 }
 
@@ -2333,7 +2390,7 @@ compose_remove_device() {
     local device="$1" service="${2:-node}"
     local file="$APP_DIR/docker-compose.yml"
     [ -f "$file" ] || return 1
-    yq eval "del(.services[\"$service\"].devices[] | select(. == \"$device\"))" -i "$file" 2>/dev/null
+    with_node_env_lock yq eval "del(.services[\"$service\"].devices[] | select(. == \"$device\"))" -i "$file" 2>/dev/null
 }
 
 prepare_host_devices() {
@@ -2586,10 +2643,10 @@ validate_node_version() {
 
 print_dev_image_note() {
     local image
-    image=$(yq eval -r '.services["node"].image // ""' "$COMPOSE_FILE" 2>/dev/null) || image=""
-    [ -n "$image" ] || image="ghcr.io/free-guy-ir/node:dev"
-    colorized_echo yellow "Note: $image is an unreleased build of the node dev branch, meant for testing only."
-    colorized_echo yellow "      '$APP_NAME update' pulls the newest dev build; '$APP_NAME update --version latest' returns to the latest release."
+    image=$(node_compose_image "$COMPOSE_FILE" 2>/dev/null) || image=""
+    [ -n "$image" ] || image="ghcr.io/free-guy-ir/node:${NODE_DEV_IMAGE_TAG}"
+    colorized_echo yellow "Note: $image is an unreleased build of the node main branch, meant for testing only."
+    colorized_echo yellow "      '$APP_NAME update' pulls the newest main build; '$APP_NAME update --version latest' returns to the latest release."
 }
 
 # Execute node installation workflow with option parsing and setup.
@@ -3360,12 +3417,72 @@ logs_command() {
     fi
 }
 
+SWITCH_COMPOSE_BEFORE=""
+SWITCH_COMPOSE_AFTER=""
+
+discard_switch_backups() {
+    rm -f "$SWITCH_COMPOSE_BEFORE" "$SWITCH_COMPOSE_AFTER"
+    SWITCH_COMPOSE_BEFORE=""
+    SWITCH_COMPOSE_AFTER=""
+    trap - EXIT
+}
+
+switch_node_image() {
+    local image_tag="$1"
+    local current_image="$2"
+    local target_image="$3"
+    colorized_echo blue "Switching node image to: $image_tag"
+    if ! acquire_node_env_lock; then
+        colorized_echo red "✗ Could not lock $ENV_FILE; the node image was not switched."
+        exit 1
+    fi
+    if [ "$(retag_node_image "$(node_compose_image "$COMPOSE_FILE")" "$image_tag")" != "$target_image" ]; then
+        release_node_env_lock
+        colorized_echo red "✗ The node image in $COMPOSE_FILE changed while $target_image was pulled; nothing was changed."
+        exit 1
+    fi
+    SWITCH_COMPOSE_BEFORE=$(mktemp "$APP_DIR/.docker-compose.before.XXXXXX") || die "Could not back up $COMPOSE_FILE"
+    SWITCH_COMPOSE_AFTER=$(mktemp "$APP_DIR/.docker-compose.after.XXXXXX") || die "Could not back up $COMPOSE_FILE"
+    trap 'rm -f "$SWITCH_COMPOSE_BEFORE" "$SWITCH_COMPOSE_AFTER"' EXIT
+    cat "$COMPOSE_FILE" >"$SWITCH_COMPOSE_BEFORE" || die "Could not back up $COMPOSE_FILE"
+    if ! set_node_image_tag "$image_tag" "$COMPOSE_FILE"; then
+        cat "$SWITCH_COMPOSE_BEFORE" >"$COMPOSE_FILE"
+        release_node_env_lock
+        colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required); it was restored."
+        exit 1
+    fi
+    cat "$COMPOSE_FILE" >"$SWITCH_COMPOSE_AFTER" || die "Could not back up $COMPOSE_FILE"
+    release_node_env_lock
+    report_dropped_image_digest "$current_image" "$image_tag"
+    colorized_echo green "✓ Docker image version set to: $image_tag ($target_image)"
+}
+
+restore_switched_compose() {
+    if ! acquire_node_env_lock; then
+        colorized_echo red "✗ The pull failed and $ENV_FILE stayed locked, so $COMPOSE_FILE still names the new image; its previous content is in $SWITCH_COMPOSE_BEFORE."
+        trap - EXIT
+        return 1
+    fi
+    if cmp -s "$COMPOSE_FILE" "$SWITCH_COMPOSE_AFTER"; then
+        cat "$SWITCH_COMPOSE_BEFORE" >"$COMPOSE_FILE"
+        colorized_echo red "✗ The pull failed; $COMPOSE_FILE was restored and the node keeps its previous image."
+        release_node_env_lock
+        discard_switch_backups
+        return 0
+    fi
+    release_node_env_lock
+    colorized_echo red "✗ The pull failed and $COMPOSE_FILE was changed by another command meanwhile, so it was not restored; its content before the switch is in $SWITCH_COMPOSE_BEFORE."
+    trap - EXIT
+    return 1
+}
+
 # Update node script, completions, container images, and restart services.
 update_command() {
     check_running_as_root
     local no_update_service=false
     local node_version=""
     local node_version_set="false"
+    local image_tag="" current_image="" target_image=""
     # Parse args
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -3420,30 +3537,38 @@ update_command() {
         if ! refuse_node_image_override_pin "$node_version"; then
             exit 1
         fi
+        image_tag=$(node_image_tag_for "$node_version")
+        if ! current_image=$(node_compose_image "$COMPOSE_FILE") || [ -z "$current_image" ]; then
+            colorized_echo red "✗ Could not read the node image from $COMPOSE_FILE; nothing was changed."
+            exit 1
+        fi
+        target_image=$(retag_node_image "$current_image" "$image_tag")
+        colorized_echo blue "Pulling $target_image before switching to it"
+        if ! pull_node_image "$target_image"; then
+            colorized_echo red "✗ Could not pull $target_image, so $COMPOSE_FILE was not changed and the node keeps $current_image."
+            exit 1
+        fi
     fi
     detect_compose
     update_node_script
     uninstall_completion
     install_completion
     if [ "$node_version_set" = true ]; then
-        colorized_echo blue "Switching node image to: $node_version"
-        if ! acquire_node_env_lock; then
-            colorized_echo red "✗ Could not lock $ENV_FILE; the node image was not switched and nothing was pulled."
-            exit 1
-        fi
-        if ! set_node_image_tag "$node_version" "$COMPOSE_FILE"; then
-            release_node_env_lock
-            colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required)"
-            exit 1
-        fi
-        release_node_env_lock
-        colorized_echo green "✓ Docker image version set to: $node_version"
+        switch_node_image "$image_tag" "$current_image" "$target_image"
         if [ "$node_version" == "dev" ]; then
             print_dev_image_note
         fi
     fi
     colorized_echo blue "Pulling latest version"
-    update_node
+    if [ "$node_version_set" = true ]; then
+        if ! update_node; then
+            restore_switched_compose
+            exit 1
+        fi
+        discard_switch_backups
+    else
+        update_node
+    fi
     colorized_echo blue "Restarting node services"
     down_node
     up_node
