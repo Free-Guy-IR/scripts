@@ -1832,7 +1832,7 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     trap 'true' INT
     for discard_case in \
         "after|TERM|inherited|143" "after|INT|inherited|130" "after|HUP|inherited|129" \
-        "before|TERM|inherited|143" "before|HUP|inherited|129" \
+        "before|TERM|inherited|143" "before|INT|inherited|130" "before|HUP|inherited|129" \
         "after|PIPE|default|141" "before|PIPE|default|141" "after|TERM|default|143" \
         "after|TERM|ignore|143" "before|TERM|ignore|143" "after|HUP|ignore|129" "after|PIPE|ignore|0"; do
         IFS='|' read -r discard_at discard_signal discard_disposition discard_status <<< "$discard_case"
