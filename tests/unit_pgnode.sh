@@ -1347,7 +1347,8 @@ EOF
 # shellcheck disable=SC2317
 run_update_command() {
     : > "$UPDATE_CALLS"
-    if UPDATE_OUT=$(
+    set +e
+    UPDATE_OUT=$(
         [ "$COMPOSE_PULL_DEAD_OUTPUT" != "true" ] || set -e
         APP_DIR="$UPDATE_DIR/app"
         DATA_DIR="$UPDATE_DIR/data"
@@ -1410,11 +1411,51 @@ run_update_command() {
             }
         fi
         update_command "$@" 2>&1
-    ); then
+    )
+    UPDATE_STATUS=$?
+    set -e
+}
+
+run_update_command_with_sigpipe() {
+    local disposition="$1"
+    shift
+    local harness="$WORK_DIR/sigpipe-harness.sh"
+    local child="$WORK_DIR/sigpipe-child.sh"
+    local out_file="$WORK_DIR/sigpipe-out"
+    if ! command -v perl >/dev/null 2>&1; then
+        UPDATE_STATUS=127
+        UPDATE_OUT="perl is required to start the update with SIGPIPE set to $disposition"
+        return 0
+    fi
+    {
+        declare -f
+        declare -p UPDATE_CALLS UPDATE_DIR UPDATE_TAG_FAILS DOCKER_PULL_FAILS COMPOSE_PULL_FAILS COMPOSE_PULL_SIGNAL \
+            COMPOSE_PULL_MUTATES COMPOSE_PULL_DEAD_OUTPUT TAG_WRITE_SIGNAL UNLOCK_SIGNAL RELEASE_API_MODE
+    } > "$harness"
+    command cat > "$child" <<'CHILD'
+set -euo pipefail
+pg_node_script="$1"
+harness="$2"
+out_file="$3"
+shift 3
+update_args=("$@")
+set --
+curl() { echo ""; return 0; }
+source "$pg_node_script"
+source "$harness"
+run_update_command "${update_args[@]}"
+printf "%s" "$UPDATE_OUT" > "$out_file"
+exit "$UPDATE_STATUS"
+CHILD
+    : > "$out_file"
+    : > "$UPDATE_CALLS"
+    if perl -e '$SIG{PIPE} = shift(@ARGV) eq "ignore" ? "IGNORE" : "DEFAULT"; exec @ARGV or exit 127' \
+        "$disposition" bash "$child" "$ROOT_DIR/pg-node.sh" "$harness" "$out_file" "$@"; then
         UPDATE_STATUS=0
     else
         UPDATE_STATUS=$?
     fi
+    UPDATE_OUT=$(< "$out_file")
 }
 
 fixture_image() {
@@ -1703,17 +1744,31 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     pass "update --dev signal cases: the test shell survives a child that dies by SIGINT"
 
     if [ -w /dev/full ]; then
-        for dead_signal in HUP:129 PIPE:141; do
+        for dead_case in \
+            "HUP|inherited|129|dies by the signal|update --dev, SIGHUP during the compose pull with a dead terminal" \
+            "PIPE|default|141|dies by the signal|update --dev, SIGPIPE during the compose pull with a dead terminal" \
+            "PIPE|ignore|1|exits 1 at its first write to the dead terminal|update --dev, SIGPIPE ignored on entry, during the compose pull with a dead terminal"; do
+            IFS='|' read -r dead_signal dead_disposition dead_status dead_outcome dead_label <<< "$dead_case"
             make_update_fixture "latest"
             COMPOSE_PULL_DEAD_OUTPUT="true"
-            COMPOSE_PULL_SIGNAL="${dead_signal%%:*}"
-            run_update_command --dev
+            COMPOSE_PULL_SIGNAL="$dead_signal"
+            if [ "$dead_disposition" = inherited ]; then
+                run_update_command --dev
+            else
+                run_update_command_with_sigpipe "$dead_disposition" --dev
+            fi
             COMPOSE_PULL_DEAD_OUTPUT="false"
             COMPOSE_PULL_SIGNAL=""
-            dead_label="update --dev, SIG${dead_signal%%:*} during the compose pull with a dead terminal"
-            assert_eq "$UPDATE_STATUS" "${dead_signal#*:}" "$dead_label: dies by the signal"
+            assert_eq "$UPDATE_STATUS" "$dead_status" "$dead_label: $dead_outcome"
+            if [[ "$UPDATE_OUT" == *"Docker image version set to: main"* ]]; then
+                pass "$dead_label: the compose file named the new image before the pull"
+            else
+                fail "$dead_label: the compose file named the new image before the pull (got: $UPDATE_OUT)"
+            fi
+            assert_true "$dead_label: the compose pull ran" grep -q "^compose .* pull$" "$UPDATE_CALLS"
             assert_true "$dead_label: compose file restored byte-identical" \
                 fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+            assert_false "$dead_label: container not recreated" grep -q " up -d" "$UPDATE_CALLS"
             assert_false "$dead_label: no backup left behind although the message could not be written" \
                 bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
             assert_false "$dead_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"

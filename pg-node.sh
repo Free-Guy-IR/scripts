@@ -3666,11 +3666,13 @@ update_command() {
             undo_node_image_switch "The pull failed" || true
             exit 1
         fi
-        discard_switch_backups
     else
         update_node
     fi
     colorized_echo blue "Restarting node services"
+    if [ "$node_version_set" = true ]; then
+        discard_switch_backups
+    fi
     down_node
     up_node
 
