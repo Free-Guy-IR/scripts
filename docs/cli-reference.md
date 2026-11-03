@@ -295,7 +295,7 @@ The companion `pg-node-service` background daemon maintains synchronization and 
 
 | Command | Description |
 | :--- | :--- |
-| `service-install` | Installs the systemd unit (`pg-node-service.service`) and starts it. For a custom-name node whose data volume is mounted at `/var/lib/pg-node` while `.env` names certificate paths there, the unit binds the host data directory read-only at `/var/lib/pg-node`, so node-serviced reads the same certificate the container does. |
+| `service-install` | Installs the systemd unit (`pg-node-service.service`) and starts it. For a custom-name node whose data volume is mounted at `/var/lib/pg-node` while `.env` names certificate paths there, the unit binds the host data directory read-only at `/var/lib/pg-node`, so node-serviced reads the same certificate the container does. No bind is written when the two paths resolve to the same directory or one lies inside the other, for example through a symlink. When `/var/lib/pg-node` does not exist, systemd creates it empty on the first start of the unit, and `uninstall` leaves it. |
 | `service-start` | Starts the systemd service. |
 | `service-stop` | Stops the systemd service. |
 | `service-restart` | Restarts the systemd service. |

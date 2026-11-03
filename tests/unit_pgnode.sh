@@ -1319,7 +1319,9 @@ DOCKER_PULL_FAILS="false"
 COMPOSE_PULL_FAILS="false"
 COMPOSE_PULL_SIGNAL=""
 COMPOSE_PULL_MUTATES="false"
+COMPOSE_PULL_DEAD_OUTPUT="false"
 TAG_WRITE_SIGNAL=""
+UNLOCK_SIGNAL=""
 
 make_update_fixture() {
     local image="${2:-ghcr.io/free-guy-ir/node}"
@@ -1346,6 +1348,7 @@ EOF
 run_update_command() {
     : > "$UPDATE_CALLS"
     if UPDATE_OUT=$(
+        [ "$COMPOSE_PULL_DEAD_OUTPUT" != "true" ] || set -e
         APP_DIR="$UPDATE_DIR/app"
         DATA_DIR="$UPDATE_DIR/data"
         COMPOSE_FILE="$APP_DIR/docker-compose.yml"
@@ -1361,6 +1364,9 @@ run_update_command() {
             if [ "${*: -1}" = "pull" ] && [ "$COMPOSE_PULL_MUTATES" = "true" ]; then
                 printf '    labels: [added-meanwhile]\n' >> "$COMPOSE_FILE"
             fi
+            if [ "${*: -1}" = "pull" ] && [ "$COMPOSE_PULL_DEAD_OUTPUT" = "true" ]; then
+                exec >/dev/full 2>/dev/full
+            fi
             if [ "${*: -1}" = "pull" ] && [ -n "$COMPOSE_PULL_SIGNAL" ]; then
                 kill -s "$COMPOSE_PULL_SIGNAL" "$UPDATE_PID"
             fi
@@ -1375,6 +1381,27 @@ run_update_command() {
         curl() { echo "curl $*" >> "$UPDATE_CALLS"; release_api_reply "$@"; }
         if [ "$UPDATE_TAG_FAILS" = "true" ]; then
             set_node_image_tag() { return 1; }
+        fi
+        if [ -n "$UNLOCK_SIGNAL" ]; then
+            flock() {
+                local flock_status=0
+                command flock "$@" || flock_status=$?
+                if [ "$*" = "-u 8" ] && [ ! -e "$UPDATE_DIR/unlock-signalled" ]; then
+                    : > "$UPDATE_DIR/unlock-signalled"
+                    kill -s "$UNLOCK_SIGNAL" "$UPDATE_PID"
+                fi
+                return "$flock_status"
+            }
+            cmp() {
+                if [ -e "$UPDATE_DIR/unlock-signalled" ]; then
+                    if command flock -n "$UPDATE_DIR/app/.env.lock" true; then
+                        echo free >> "$UPDATE_DIR/lock-at-compare"
+                    else
+                        echo held >> "$UPDATE_DIR/lock-at-compare"
+                    fi
+                fi
+                command cmp "$@"
+            }
         fi
         if [ -n "$TAG_WRITE_SIGNAL" ]; then
             set_node_image_tag() {
@@ -1650,6 +1677,7 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
         fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
     assert_false "plain update: never pulls by itself" grep -q "^docker pull" "$UPDATE_CALLS"
 
+    trap 'true' INT
     for pull_signal in TERM:143 INT:130 HUP:129; do
         make_update_fixture "latest"
         COMPOSE_PULL_SIGNAL="${pull_signal%%:*}"
@@ -1671,6 +1699,60 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
         fi
         assert_secrets_unchanged "update --dev, SIG${pull_signal%%:*} during the compose pull"
     done
+    trap - INT
+    pass "update --dev signal cases: the test shell survives a child that dies by SIGINT"
+
+    if [ -w /dev/full ]; then
+        for dead_signal in HUP:129 PIPE:141; do
+            make_update_fixture "latest"
+            COMPOSE_PULL_DEAD_OUTPUT="true"
+            COMPOSE_PULL_SIGNAL="${dead_signal%%:*}"
+            run_update_command --dev
+            COMPOSE_PULL_DEAD_OUTPUT="false"
+            COMPOSE_PULL_SIGNAL=""
+            dead_label="update --dev, SIG${dead_signal%%:*} during the compose pull with a dead terminal"
+            assert_eq "$UPDATE_STATUS" "${dead_signal#*:}" "$dead_label: dies by the signal"
+            assert_true "$dead_label: compose file restored byte-identical" \
+                fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+            assert_false "$dead_label: no backup left behind although the message could not be written" \
+                bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+            assert_false "$dead_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+        done
+
+        make_update_fixture "latest"
+        COMPOSE_PULL_DEAD_OUTPUT="true"
+        COMPOSE_PULL_MUTATES="true"
+        COMPOSE_PULL_SIGNAL="HUP"
+        run_update_command --dev
+        COMPOSE_PULL_DEAD_OUTPUT="false"
+        COMPOSE_PULL_MUTATES="false"
+        COMPOSE_PULL_SIGNAL=""
+        dead_label="update --dev, SIGHUP with a dead terminal after another command changed the compose file"
+        assert_eq "$UPDATE_STATUS" "129" "$dead_label: dies by the signal"
+        assert_true "$dead_label: the other command's change is kept" \
+            grep -q "added-meanwhile" "$UPDATE_DIR/app/docker-compose.yml"
+        assert_eq "$(find "$UPDATE_DIR/app" -maxdepth 1 -name '.docker-compose.before.*' | wc -l)" "1" \
+            "$dead_label: exactly the copy from before the switch is kept"
+        assert_false "$dead_label: no .docker-compose.after copy left behind" \
+            bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose.after'"
+    else
+        echo "(skipped dead-terminal restore cases: /dev/full not available)"
+    fi
+
+    make_update_fixture "latest"
+    UNLOCK_SIGNAL="TERM"
+    run_update_command --dev
+    UNLOCK_SIGNAL=""
+    unlock_label="update --dev, SIGTERM while the switch releases the lock"
+    assert_eq "$UPDATE_STATUS" "143" "$unlock_label: dies by the signal"
+    assert_true "$unlock_label: the signal landed inside the release" test -e "$UPDATE_DIR/unlock-signalled"
+    assert_eq "$(sort -u "$UPDATE_DIR/lock-at-compare" 2>/dev/null | tr '\n' ' ')" "held " \
+        "$unlock_label: the restore compares and writes the compose file only while it holds the lock"
+    assert_true "$unlock_label: compose file restored byte-identical" \
+        fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+    assert_false "$unlock_label: no backup left behind" \
+        bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+    assert_false "$unlock_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"
 
     make_update_fixture "latest"
     TAG_WRITE_SIGNAL="TERM"

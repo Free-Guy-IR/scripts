@@ -154,6 +154,33 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     write_node_service_unit
     check "named volume: no bind" unit_matches
 
+    mkdir -p "$DATA_DIR/inner" "$WORK_DIR/elsewhere"
+    ln -sfn "$DATA_DIR" "$WORK_DIR/target-link"
+    write_layout "$DATA_DIR:$WORK_DIR/target-link" "$WORK_DIR/target-link"
+    write_node_service_unit
+    check "target that is a symlink to the data dir: no bind, so the data dir is never mounted read-only over itself" unit_matches
+
+    ln -sfn "$DATA_DIR/inner" "$WORK_DIR/nested-link"
+    write_layout "$DATA_DIR:$WORK_DIR/nested-link" "$WORK_DIR/nested-link"
+    write_node_service_unit
+    check "target that is a symlink into the data dir: no bind" unit_matches
+
+    ln -sfn "$WORK_DIR" "$WORK_DIR/outer-link"
+    write_layout "$DATA_DIR:$WORK_DIR/outer-link" "$WORK_DIR/outer-link"
+    write_node_service_unit
+    check "target that is a symlink to a parent of the data dir: no bind" unit_matches
+
+    ln -sfn "$WORK_DIR/elsewhere" "$WORK_DIR/source-link"
+    write_layout "$WORK_DIR/source-link:$WORK_DIR/elsewhere" "$WORK_DIR/elsewhere"
+    write_node_service_unit
+    check "source that is a symlink to the target: no bind" unit_matches
+
+    ln -sfn "$WORK_DIR/elsewhere" "$WORK_DIR/unrelated-link"
+    write_layout "$DATA_DIR:$WORK_DIR/unrelated-link" "$WORK_DIR/unrelated-link"
+    write_node_service_unit
+    check "target that is a symlink to an unrelated directory: the bind is still written" \
+        unit_matches "$DATA_DIR:$WORK_DIR/unrelated-link"
+
     write_layout "$DATA_DIR:/var/lib/pg-node" "/var/lib/pg-node"
     default_unit=$(
         APP_NAME="pg-node"

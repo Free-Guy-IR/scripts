@@ -76,7 +76,15 @@ update)
     check_running_as_root() { :; }
     install_yq() { :; }
     detect_compose() { COMPOSE="fake_compose"; }
-    fake_compose() { echo "compose $*" >>"$CASE_DIR/calls"; }
+    fake_compose() {
+        echo "compose $*" >>"$CASE_DIR/calls"
+        if [ "${*: -1}" = "pull" ] && [ -n "${PULL_SIGNAL_AFTER_GO:-}" ]; then
+            : >"$CASE_DIR/pulling"
+            wait_for "$CASE_DIR/go" || return 1
+            kill -s "$PULL_SIGNAL_AFTER_GO" "$$"
+            sleep 5
+        fi
+    }
     ensure_docker_service_running() { :; }
     update_node_script() { echo "update_node_script" >>"$CASE_DIR/calls"; }
     docker() { echo "docker $*" >>"$CASE_DIR/calls"; }
@@ -107,6 +115,7 @@ hold-lock)
     acquire_node_env_lock || exit 93
     : >"$CASE_DIR/lock-held"
     sleep "$HOLD_SECONDS"
+    date +%s%N >"$CASE_DIR/holder-released-at"
     release_node_env_lock
     ;;
 esac
@@ -216,6 +225,106 @@ for round in 1 2; do
         bash -c "case '$final_image' in ghcr.io/free-guy-ir/node:main|ghcr.io/free-guy-ir/node:v0.8.21-example) exit 0 ;; *) exit 1 ;; esac"
     check "switch round $round: other compose keys intact" test "$(compose_volume)" = "/var/lib/pg-node:/var/lib/pg-node"
     check "switch round $round: .env byte-identical" cmp -s "$CASE_DIR/env.before" "$CASE_DIR/app/.env"
+done
+
+wait_for_file() {
+    for _ in $(seq 1 200); do
+        [ -e "$1" ] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+kept_copies() { find "$CASE_DIR/app" -maxdepth 1 -name ".docker-compose.$1.*"; }
+
+start_interrupted_update() {
+    RUNNER_MODE=update PULL_SIGNAL_AFTER_GO=TERM NODE_ENV_LOCK_WAIT_SECONDS="$1" bash "$RUNNER" --dev >"$CASE_DIR/update.out" 2>&1 &
+    update_pid=$!
+    wait_for_file "$CASE_DIR/pulling"
+}
+
+new_case undo-after-writer
+start_interrupted_update 20
+check "undo vs writer: the image was switched before the pull" test "$(compose_image)" = "ghcr.io/free-guy-ir/node:main"
+RUNNER_MODE=slow-compose-writer WRITER_HOLD_SECONDS=2 bash "$RUNNER" &
+writer_pid=$!
+wait_for_file "$CASE_DIR/writer-at-point"
+: >"$CASE_DIR/go"
+wait "$update_pid"
+update_status=$?
+update_done_at=$(date +%s%N)
+wait "$writer_pid"
+writer_status=$?
+check "undo vs writer: SIGTERM during the pull exits 143" test "$update_status" -eq 143
+check "undo vs writer: the writer exits 0" test "$writer_status" -eq 0
+check "undo vs writer: the restore waited for the writer to release the lock" \
+    test "$update_done_at" -gt "$(cat "$CASE_DIR/writer-released-at")"
+check "undo vs writer: the writer's compose change is kept" test "$(compose_volume)" = "/var/lib/switchtest:/var/lib/pg-node"
+check "undo vs writer: the writer's .env change survives" grep -q '^XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray$' "$CASE_DIR/app/.env"
+check "undo vs writer: the copy from before the switch is kept" cmp -s "$CASE_DIR/compose.before" "$(kept_copies before)"
+check "undo vs writer: no .docker-compose.after copy left" test -z "$(kept_copies after)"
+check "undo vs writer: says the compose file was changed meanwhile" grep -q 'was changed by another command meanwhile' "$CASE_DIR/update.out"
+check "undo vs writer: lock released" test ! -s "$CASE_DIR/app/.env.lock"
+
+new_case undo-after-holder
+start_interrupted_update 20
+RUNNER_MODE=hold-lock HOLD_SECONDS=2 bash "$RUNNER" &
+holder_pid=$!
+wait_for_file "$CASE_DIR/lock-held"
+: >"$CASE_DIR/go"
+wait "$update_pid"
+update_status=$?
+update_done_at=$(date +%s%N)
+wait "$holder_pid"
+check "undo vs lock holder: SIGTERM during the pull exits 143" test "$update_status" -eq 143
+check "undo vs lock holder: the restore waited for the holder to release the lock" \
+    test "$update_done_at" -gt "$(cat "$CASE_DIR/holder-released-at")"
+check "undo vs lock holder: compose file restored byte-identical" cmp -s "$CASE_DIR/compose.before" "$CASE_DIR/app/docker-compose.yml"
+check "undo vs lock holder: no backup left" test -z "$(kept_copies '*')"
+check "undo vs lock holder: .env byte-identical" cmp -s "$CASE_DIR/env.before" "$CASE_DIR/app/.env"
+check "undo vs lock holder: lock released" test ! -s "$CASE_DIR/app/.env.lock"
+
+new_case undo-lock-timeout
+start_interrupted_update 1
+RUNNER_MODE=hold-lock HOLD_SECONDS=6 bash "$RUNNER" &
+holder_pid=$!
+wait_for_file "$CASE_DIR/lock-held"
+: >"$CASE_DIR/go"
+wait "$update_pid"
+update_status=$?
+kill "$holder_pid" 2>/dev/null
+wait "$holder_pid" 2>/dev/null
+check "undo past the lock wait: exits 143" test "$update_status" -eq 143
+check "undo past the lock wait: compose file not written without the lock" test "$(compose_image)" = "ghcr.io/free-guy-ir/node:main"
+check "undo past the lock wait: the copy from before the switch is kept" cmp -s "$CASE_DIR/compose.before" "$(kept_copies before)"
+check "undo past the lock wait: no .docker-compose.after copy left" test -z "$(kept_copies after)"
+check "undo past the lock wait: says another command holds the lock" grep -q 'another command still holds the lock' "$CASE_DIR/update.out"
+
+for round in 1 2 3; do
+    new_case "undo-and-device-$round"
+    start_interrupted_update 20
+    SLOW_YQ_LOG="$CASE_DIR/write-windows" PATH="$WORK_DIR/bin:$PATH" RUNNER_MODE=add-device NODE_ENV_LOCK_WAIT_SECONDS=20 \
+        bash "$RUNNER" >"$CASE_DIR/b.out" 2>&1 &
+    b_pid=$!
+    : >"$CASE_DIR/go"
+    wait "$update_pid"
+    update_status=$?
+    wait "$b_pid"
+    b_status=$?
+    check "undo and device round $round: the update dies by SIGTERM and the device writer exits 0" \
+        test "$update_status" -eq 143 -a "$b_status" -eq 0
+    check "undo and device round $round: the device is never lost" \
+        bash -c "yq eval -r '.services[\"node\"].devices // [] | .[]' '$CASE_DIR/app/docker-compose.yml' | grep -qx '/dev/ppp:/dev/ppp'"
+    final_image=$(compose_image)
+    if [ "$final_image" = "ghcr.io/free-guy-ir/node:v0.8.20-degraded-start" ]; then
+        check "undo and device round $round: restored first, then the device was added; no backup left" test -z "$(kept_copies '*')"
+    else
+        check "undo and device round $round: the device came first, so the switch stays and the copy from before it is kept" \
+            bash -c "test '$final_image' = ghcr.io/free-guy-ir/node:main && cmp -s '$CASE_DIR/compose.before' '$(kept_copies before)'"
+    fi
+    check "undo and device round $round: other compose keys intact" test "$(compose_volume)" = "/var/lib/pg-node:/var/lib/pg-node"
+    check "undo and device round $round: .env byte-identical" cmp -s "$CASE_DIR/env.before" "$CASE_DIR/app/.env"
+    check "undo and device round $round: lock released" test ! -s "$CASE_DIR/app/.env.lock"
 done
 
 echo "Results: $PASS passed, $FAIL failed"

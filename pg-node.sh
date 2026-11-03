@@ -408,10 +408,10 @@ release_node_env_lock() {
     if [ "$NODE_ENV_LOCK_HELD" != true ]; then
         return 0
     fi
+    NODE_ENV_LOCK_HELD=false
     : >"$(node_env_lock_path)" 2>/dev/null || true
     flock -u 8 >/dev/null 2>&1 || true
     exec 8>&-
-    NODE_ENV_LOCK_HELD=false
 }
 
 node_env_write_target() {
@@ -2556,8 +2556,15 @@ node_compose_data_mount_source() {
     printf '%s\n' "${volume%%:*}"
 }
 
+node_service_resolved_path() {
+    local resolved
+    resolved=$(readlink -f "$1" 2>/dev/null) || resolved=""
+    [ -n "$resolved" ] || resolved="$1"
+    printf '%s\n' "${resolved%/}"
+}
+
 node_service_data_bind() {
-    local source target cert key
+    local source target cert key resolved_source resolved_target
     [ "$APP_NAME" != "pg-node" ] || return 0
     target=$(node_compose_data_mount_target)
     source=$(node_compose_data_mount_source)
@@ -2566,6 +2573,10 @@ node_service_data_bind() {
     target="${target%/}"
     [[ -n "$source" && -n "$target" && "$source" != "$target" ]] || return 0
     [[ "$source" != "$target"/* && "$target" != "$source"/* ]] || return 0
+    resolved_source=$(node_service_resolved_path "$source")
+    resolved_target=$(node_service_resolved_path "$target")
+    [[ -n "$resolved_source" && -n "$resolved_target" && "$resolved_source" != "$resolved_target" ]] || return 0
+    [[ "$resolved_source" != "$resolved_target"/* && "$resolved_target" != "$resolved_source"/* ]] || return 0
     cert=$(read_node_service_env_value SSL_CERT_FILE) || return 0
     key=$(read_node_service_env_value SSL_KEY_FILE) || return 0
     [[ "$cert" == "$target"/* || "$key" == "$target"/* ]] || return 0
@@ -3498,9 +3509,10 @@ discard_switch_backups() {
 }
 
 keep_switch_backup() {
+    local kept_copy="$SWITCH_COMPOSE_BEFORE"
     rm -f "$SWITCH_COMPOSE_AFTER"
-    colorized_echo red "✗ $1; its content before the switch is in $SWITCH_COMPOSE_BEFORE."
     disarm_switch_guard
+    colorized_echo red "✗ $1; its content before the switch is in $kept_copy." || true
 }
 
 undo_node_image_switch() {
@@ -3512,7 +3524,7 @@ undo_node_image_switch() {
     elif [ "$SWITCH_COMPOSE_STATE" = saving ]; then
         discard_switch_backups
     elif ! acquire_node_env_lock; then
-        keep_switch_backup "$reason and $ENV_FILE stayed locked, so $COMPOSE_FILE still names the new image"
+        keep_switch_backup "$reason and another command still holds the lock, so $COMPOSE_FILE still names the new image"
         undo_status=1
     elif [ "$SWITCH_COMPOSE_STATE" = switched ] && ! cmp -s "$COMPOSE_FILE" "$SWITCH_COMPOSE_AFTER"; then
         release_node_env_lock
@@ -3524,8 +3536,8 @@ undo_node_image_switch() {
         undo_status=1
     else
         release_node_env_lock
-        colorized_echo red "✗ $reason; $COMPOSE_FILE was restored and the node keeps its previous image."
         discard_switch_backups
+        colorized_echo red "✗ $reason; $COMPOSE_FILE was restored and the node keeps its previous image." || true
     fi
     trap - HUP INT TERM
     return "$undo_status"

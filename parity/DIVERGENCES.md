@@ -244,7 +244,11 @@ code, tests and docs without upstream's code comments, with these changes:
   `docker compose pull` fails, the compose file is restored byte-identical while it still holds what the switch
   wrote. The same restore runs from the EXIT trap when the update is interrupted by SIGINT, SIGTERM or SIGHUP, under
   the `.env` lock; the trap is armed only once both backup files exist. When the compose file was changed by another
-  command meanwhile, the update keeps the copy from before the switch, removes the other one and prints the path. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
+  command meanwhile, the update keeps the copy from before the switch, removes the other one and prints the path.
+  The restore removes or keeps the copies and disarms the trap before it prints, and a print that fails, for
+  example on a dropped SSH session, does not stop it. `release_node_env_lock` marks the lock as released before it
+  unlocks, so a signal that lands while the switch releases the lock makes the restore take the lock again instead
+  of restoring without it. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
   that image before it takes the lock, so a yq failure or a missing image stops it before the certificate, `.env`
   or compose file change.
 - A digest pin (`image@sha256:...` or `image:tag@sha256:...`) is replaced by the requested tag and reported.
@@ -278,7 +282,11 @@ code, tests and docs without upstream's code comments, with these changes:
   `tests/test_node_image_switch_interleaving.sh` runs a switch against a writer that holds the lock across a compose
   read-modify-write, against a lock held past the wait, and, with a yq that sleeps between reading and writing the
   file, a switch concurrent with `compose_add_device` and two concurrent switches; it checks that the slow
-  read-modify-writes never overlap and that no change is lost.
+  read-modify-writes never overlap and that no change is lost. It also interrupts a switched update with SIGTERM
+  while another writer holds the lock: the restore waits for the writer, keeps a compose change the writer made
+  with the copy from before the switch, restores the file byte-identical when the writer changed nothing, and,
+  raced against `compose_add_device`, never loses the device. `tests/unit_pgnode.sh` covers a signal during the
+  release and a restore whose message write fails.
 
 ## Certificate paths of a custom-name node, and node-serviced (fork only)
 
@@ -296,8 +304,16 @@ is read by two programs: the node container, through `env_file`, and node-servic
   node-serviced unit, so node-serviced sees the data directory where the container sees it, and the readiness probe
   reads the certificate from the host directory that bind names. The line is written only for a custom name, an
   absolute host source that differs from the target, and a `.env` whose certificate or key path lies under the
-  target. Every other unit is byte-identical to before. `pg-node update` does not rewrite the unit, so an existing
-  installation on that layout gets the line from `sudo my-node service-install`.
+  target, after `readlink -f` of both paths. When the resolved source and target are the same directory or one lies
+  inside the other, for example when `/var/lib/pg-node` is a symlink to `/var/lib/my-node`, no line is written,
+  because systemd follows the symlink and would mount the data directory read-only over itself, which breaks
+  `core-update` and `geofiles` run by node-serviced. Every other unit is byte-identical to before. `pg-node update`
+  does not rewrite the unit, so an existing installation on that layout gets the line from
+  `sudo my-node service-install`.
+- When `/var/lib/pg-node` does not exist on the host, systemd creates it, empty and owned by root, the first time
+  the unit starts with that line, and `my-node uninstall` leaves it. Nothing in the scripts reads its existence
+  as an installed default node (`is_node_installed` checks `/opt/pg-node`), so it can be removed by hand once no
+  unit names it.
 - Residual V2 (owner: the scripts lane, review by 2026-11-10): long-syntax volumes, a data volume that is not the
   first, `${VAR}` interpolation, or a host without mikefarah yq are not recognised and keep the old rewrite, as on
   upstream.
