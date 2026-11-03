@@ -3497,13 +3497,14 @@ SWITCH_COMPOSE_AFTER=""
 SWITCH_COMPOSE_STATE=""
 
 disarm_switch_guard() {
+    trap - EXIT
     SWITCH_COMPOSE_BEFORE=""
     SWITCH_COMPOSE_AFTER=""
     SWITCH_COMPOSE_STATE=""
-    trap - EXIT
 }
 
 discard_switch_backups() {
+    SWITCH_COMPOSE_STATE=discarding
     rm -f "$SWITCH_COMPOSE_BEFORE" "$SWITCH_COMPOSE_AFTER"
     disarm_switch_guard
 }
@@ -3521,7 +3522,7 @@ undo_node_image_switch() {
     trap '' HUP INT TERM
     if [ -z "$SWITCH_COMPOSE_STATE" ]; then
         :
-    elif [ "$SWITCH_COMPOSE_STATE" = saving ]; then
+    elif [ "$SWITCH_COMPOSE_STATE" = saving ] || [ "$SWITCH_COMPOSE_STATE" = discarding ]; then
         discard_switch_backups
     elif ! acquire_node_env_lock; then
         keep_switch_backup "$reason and another command still holds the lock, so $COMPOSE_FILE still names the new image"

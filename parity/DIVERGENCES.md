@@ -261,7 +261,12 @@ code, tests and docs without upstream's code comments, with these changes:
   The restore removes or keeps the copies and disarms the trap before it prints, and a print that fails, for
   example on a dropped SSH session, does not stop it. `release_node_env_lock` marks the lock as released before it
   unlocks, so a signal that lands while the switch releases the lock makes the restore take the lock again instead
-  of restoring without it. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
+  of restoring without it. Once `docker compose pull` succeeds, the update removes both copies before it restarts
+  the node, and from the start of that removal the switch is kept: a signal that lands while the copies are
+  removed, before or after `rm`, makes the trap finish the removal and disarm itself without restoring and without
+  naming a copy, so it never names a copy that no longer exists or claims that another command changed the file.
+  `disarm_switch_guard` clears the trap before the state, so a signal inside it cannot run the trap on cleared
+  paths. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
   that image before it takes the lock, so a yq failure or a missing image stops it before the certificate, `.env`
   or compose file change.
 - A digest pin (`image@sha256:...` or `image:tag@sha256:...`) is replaced by the requested tag and reported.
@@ -299,7 +304,9 @@ code, tests and docs without upstream's code comments, with these changes:
   while another writer holds the lock: the restore waits for the writer, keeps a compose change the writer made
   with the copy from before the switch, restores the file byte-identical when the writer changed nothing, and,
   raced against `compose_add_device`, never loses the device. `tests/unit_pgnode.sh` covers a signal during the
-  release and a restore whose message write fails. That signal lands right after `flock -u`; a signal between
+  release, a restore whose message write fails, and SIGTERM, SIGINT, SIGHUP or SIGPIPE just before and just after
+  `rm` removes the copies once the pull succeeded, with SIGPIPE at its default and ignored on entry; with SIGPIPE
+  ignored, a SIGPIPE sent there leaves the update to finish. The release signal lands right after `flock -u`; a signal between
   marking the lock released and `flock -u` has no test. In that window the restore's `acquire_node_env_lock`
   reopens fd 8, which drops the shell's reference to the locked open file description; the only child that can
   still hold fd 8 there is the short-lived command substitution that names the lock file for the truncate. So the

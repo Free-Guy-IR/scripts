@@ -1322,6 +1322,8 @@ COMPOSE_PULL_MUTATES="false"
 COMPOSE_PULL_DEAD_OUTPUT="false"
 TAG_WRITE_SIGNAL=""
 UNLOCK_SIGNAL=""
+DISCARD_SIGNAL=""
+DISCARD_SIGNAL_AT=""
 
 make_update_fixture() {
     local image="${2:-ghcr.io/free-guy-ir/node}"
@@ -1410,6 +1412,23 @@ run_update_command() {
                 kill -s "$TAG_WRITE_SIGNAL" "$UPDATE_PID"
             }
         fi
+        if [ -n "$DISCARD_SIGNAL" ]; then
+            rm() {
+                local rm_status=0
+                if [[ "$*" == *"/.docker-compose.before."* ]] && [ ! -e "$UPDATE_DIR/discard-signalled" ]; then
+                    : > "$UPDATE_DIR/discard-signalled"
+                    if [ "$DISCARD_SIGNAL_AT" = before ]; then
+                        kill -s "$DISCARD_SIGNAL" "$UPDATE_PID"
+                        command rm "$@" || rm_status=$?
+                    else
+                        command rm "$@" || rm_status=$?
+                        kill -s "$DISCARD_SIGNAL" "$UPDATE_PID"
+                    fi
+                    return "$rm_status"
+                fi
+                command rm "$@"
+            }
+        fi
         update_command "$@" 2>&1
     )
     UPDATE_STATUS=$?
@@ -1430,7 +1449,8 @@ run_update_command_with_sigpipe() {
     {
         declare -f
         declare -p UPDATE_CALLS UPDATE_DIR UPDATE_TAG_FAILS DOCKER_PULL_FAILS COMPOSE_PULL_FAILS COMPOSE_PULL_SIGNAL \
-            COMPOSE_PULL_MUTATES COMPOSE_PULL_DEAD_OUTPUT TAG_WRITE_SIGNAL UNLOCK_SIGNAL RELEASE_API_MODE
+            COMPOSE_PULL_MUTATES COMPOSE_PULL_DEAD_OUTPUT TAG_WRITE_SIGNAL UNLOCK_SIGNAL RELEASE_API_MODE \
+            DISCARD_SIGNAL DISCARD_SIGNAL_AT
     } > "$harness"
     command cat > "$child" <<'CHILD'
 set -euo pipefail
@@ -1808,6 +1828,45 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     assert_false "$unlock_label: no backup left behind" \
         bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
     assert_false "$unlock_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+
+    trap 'true' INT
+    for discard_case in \
+        "after|TERM|inherited|143" "after|INT|inherited|130" "after|HUP|inherited|129" \
+        "before|TERM|inherited|143" "before|HUP|inherited|129" \
+        "after|PIPE|default|141" "before|PIPE|default|141" "after|TERM|default|143" \
+        "after|TERM|ignore|143" "before|TERM|ignore|143" "after|HUP|ignore|129" "after|PIPE|ignore|0"; do
+        IFS='|' read -r discard_at discard_signal discard_disposition discard_status <<< "$discard_case"
+        make_update_fixture "latest"
+        DISCARD_SIGNAL="$discard_signal"
+        DISCARD_SIGNAL_AT="$discard_at"
+        if [ "$discard_disposition" = inherited ]; then
+            run_update_command --dev
+        else
+            run_update_command_with_sigpipe "$discard_disposition" --dev
+        fi
+        DISCARD_SIGNAL=""
+        DISCARD_SIGNAL_AT=""
+        discard_label="update --dev, SIG$discard_signal $discard_at removing the switch backups once the pull succeeded (SIGPIPE $discard_disposition)"
+        assert_eq "$UPDATE_STATUS" "$discard_status" "$discard_label: exit status"
+        assert_true "$discard_label: the signal was sent inside the discard" test -e "$UPDATE_DIR/discard-signalled"
+        assert_eq "$(fixture_image)" "ghcr.io/free-guy-ir/node:main" \
+            "$discard_label: the switch is kept, the compose file names the pulled image"
+        if [[ "$UPDATE_OUT" != *"its content before the switch is in"* && "$UPDATE_OUT" != *"was changed by another command"* ]]; then
+            pass "$discard_label: names no kept copy and claims no change by another command"
+        else
+            fail "$discard_label: names no kept copy and claims no change by another command (got: $UPDATE_OUT)"
+        fi
+        assert_false "$discard_label: no backup left behind" \
+            bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+        assert_false "$discard_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+        if [ "$discard_status" = 0 ]; then
+            assert_true "$discard_label: the ignored signal lets the update restart the node" grep -q " up -d" "$UPDATE_CALLS"
+        else
+            assert_false "$discard_label: container not recreated" grep -q " up -d" "$UPDATE_CALLS"
+        fi
+        assert_secrets_unchanged "$discard_label"
+    done
+    trap - INT
 
     make_update_fixture "latest"
     TAG_WRITE_SIGNAL="TERM"
