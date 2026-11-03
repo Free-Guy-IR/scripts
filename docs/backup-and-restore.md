@@ -152,10 +152,11 @@ MariaDB it also keeps the destination's `MYSQL_BUFFER_POOL_SIZE` line in `.env`
 source host's value; `.env` lines in the `KEY=value`, `export KEY=value` and
 `KEY: value` forms count, as does a first line that starts with a UTF-8 BOM.
 `pasarguard restore --fresh` sets the size computed for the recovery host before
-the database starts, and prints the backup's own line when it differs, so a tuned
-value can be put back in `/opt/pasarguard/.env` followed by `pasarguard restart`.
-If that size cannot be written, `--fresh` stops before it installs anything and the
-same command can be run again. See [database configurations](database-configurations.md).
+the database starts, and prints the backup's own line when its value differs, so a
+tuned value can be put back in `/opt/pasarguard/.env` followed by `pasarguard restart`.
+If that size cannot be written, `--fresh` stops before it writes anything to the
+application or data directory (only the recorded images have been tagged by then) and
+the same command can be run again. See [database configurations](database-configurations.md).
 It validates
 payloads before stopping application writers. It refuses a backup from another
 database engine family (for example a SQLite backup onto a PostgreSQL

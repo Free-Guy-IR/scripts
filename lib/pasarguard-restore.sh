@@ -908,6 +908,15 @@ last_buffer_pool_line() {
     printf '%s\n' "${line#"$BUFFER_POOL_BOM"}"
 }
 
+buffer_pool_line_value() {
+    local value="${1%$'\r'}"
+    value=$(sed -E 's/^[^=:]*[=:][[:space:]]*//; s/[[:space:]]+$//' <<<"$value")
+    if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "$value"
+}
+
 recovery_host_buffer_pool_line() {
     local size=""
     if declare -F mysql_buffer_pool_size_for_ram >/dev/null; then
@@ -1107,10 +1116,10 @@ prepare_fresh_restore() {
         archived_pool_line=$(last_buffer_pool_line "$stage/.env")
         host_pool_line=$(recovery_host_buffer_pool_line)
         if ! pin_host_buffer_pool_line "$host_pool_line" "$stage/.env"; then
-            colorized_echo red "Cannot set this host's MYSQL_BUFFER_POOL_SIZE in the recovered .env. Nothing was installed; fix the cause and run the same --fresh command again."
+            colorized_echo red "Cannot set this host's MYSQL_BUFFER_POOL_SIZE in the recovered .env. Nothing was written to $APP_DIR or $DATA_DIR, only the recorded images were tagged; fix the cause and run the same --fresh command again."
             return 1
         fi
-        if [ -n "$archived_pool_line" ] && [ "$archived_pool_line" != "$host_pool_line" ]; then
+        if [ -n "$archived_pool_line" ] && [ "$(buffer_pool_line_value "$archived_pool_line")" != "$(buffer_pool_line_value "$host_pool_line")" ]; then
             colorized_echo yellow "The backup's buffer pool setting was not kept: $archived_pool_line. This host uses ${host_pool_line:-the Compose default}. To use the backup's value, put it in $ENV_FILE and run pasarguard restart."
         fi
     fi

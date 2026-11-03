@@ -205,8 +205,16 @@ install without the variable drops the destination's size back to 256M.
     template default applies as before. NUL bytes in the destination's `.env` do not hide the line.
   - The line is written on a line of its own, also when the archive's `.env` has no final newline, and a line that
     does not begin as a `MYSQL_BUFFER_POOL_SIZE` assignment is refused instead of written.
-  - `restore --fresh` sets the value for the recovery host right after it installs the archive's `.env`, before the
-    database starts, and again after the app-directory sync installs the archive's `.env` a second time.
+  - `restore --fresh` sets the value for the recovery host in the staged copy of the archive's `.env` before it
+    creates or installs anything, so the database starts with it, and again after the app-directory sync installs
+    the archive's `.env` a second time. When the archive's value differs from the one written, it prints the
+    archive's line in yellow (values are compared without quotes, spaces or a carriage return). When the value
+    cannot be written, it stops in red before it writes anything to the application or data directory, only the
+    recorded images have been tagged by then, and the same `--fresh` command can be run again.
+  - A `MYSQL_BUFFER_POOL_SIZE` line counts in the `KEY=value`, `export KEY=value` and `KEY: value` forms, which
+    compose-go's dotenv parser accepts, and also when it is the first line and starts with a UTF-8 BOM; the line
+    written never carries the BOM. The match is line by line, so a line of that form inside a multi-line quoted
+    value of another key would be removed too; PasarGuard's `.env` has no multi-line values, so this stays as it is.
   - A `--fresh` run that stopped and is continued as an ordinary restore also sets the value for the recovery
     host, because its `.env` may come from an earlier attempt.
   - The size comes from `mysql_buffer_pool_size_for_ram` in `pasarguard.sh`. A `pasarguard.sh` installed before
@@ -216,7 +224,10 @@ install without the variable drops the destination's size back to 256M.
     variable (an install from before the port), the restore says that `.env` does not set the buffer pool size.
 - The offline installer `iran-sanction/pasarguard-standalone.sh` does not write the variable, as upstream's does
   not, so its installs run the template's 256M.
-- `docs/database-configurations.md` says what a restore does with the value.
+- `docs/database-configurations.md` says what a restore does with the value, and fork-only paragraphs in the
+  upstream-owned `docs/backup-and-restore.md` and `docs/backup-and-restore.fa.md` describe the kept or set line, the
+  forms that count, the printed backup line and the rerunnable stop. A later port of upstream's text for those two
+  files must keep those paragraphs.
 - Tests: `tests/test_restore_keeps_host_buffer_pool.sh`, the MySQL, MariaDB, PostgreSQL and SQLite cases in
   `tests/unit_restore_recovery.sh`, and `tests/fresh_recovery_roundtrip.sh`, which also checks the size the
   recovered MySQL or MariaDB runs with. `.github/workflows/backup-restore.yml` runs that roundtrip for a MySQL

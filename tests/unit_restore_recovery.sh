@@ -510,10 +510,11 @@ assert_eq "$(cat "$APP_DIR/.pasarguard-fresh-restore" 2>/dev/null)" "$(sha256sum
 
 make_mysql_fresh_stage() {
     local service="${1:-mysql}"
+    local pool_line="${2:-MYSQL_BUFFER_POOL_SIZE=\"4096M\"}"
     rm -rf "$APP_DIR" "$DATA_DIR" "$WORK_DIR/fresh"
     stage="$WORK_DIR/fresh"
     mkdir -p "$stage"
-    printf 'MYSQL_ROOT_PASSWORD=example-root-pass\nDB_USER=app\nDB_PASSWORD=example-pass\nDB_NAME=appdb\nMYSQL_BUFFER_POOL_SIZE="4096M"\nSQLALCHEMY_DATABASE_URL="mysql+asyncmy://app:example-pass@127.0.0.1:3306/appdb"' >"$stage/.env"
+    printf 'MYSQL_ROOT_PASSWORD=example-root-pass\nDB_USER=app\nDB_PASSWORD=example-pass\nDB_NAME=appdb\n%s\nSQLALCHEMY_DATABASE_URL="mysql+asyncmy://app:example-pass@127.0.0.1:3306/appdb"' "$pool_line" >"$stage/.env"
     printf 'services:\n  pasarguard:\n    image: pasarguard/panel:latest\n  %s:\n    image: %s:latest\n' "$service" "$service" >"$stage/docker-compose.yml"
     write_runtime "$stage" "$service" pasarguard "pasarguard/panel@$DIGEST_A" "$ID_A" "$service" "$service@$DIGEST_B" "$ID_B"
     jq -n --arg data "$DATA_DIR" --arg db "$service" \
@@ -549,6 +550,16 @@ assert_file_has "$WORK_DIR/fresh.out" "MYSQL_BUFFER_POOL_SIZE" "fresh mysql pin 
 prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
 assert_eq "$?" 0 "fresh mysql pin failure: running --fresh again provisions"
 assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="384M"' "fresh mysql pin failure: the second run sets this host's size"
+
+for same_pool_line in 'MYSQL_BUFFER_POOL_SIZE=384M' "MYSQL_BUFFER_POOL_SIZE: '384M'" $'export MYSQL_BUFFER_POOL_SIZE = "384M"  \r'; do
+    reset_fake_docker
+    make_mysql_fresh_stage mysql "$same_pool_line"
+    fake_image_present "pasarguard/panel@$DIGEST_A"
+    fake_image_present "mysql@$DIGEST_B"
+    prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+    assert_eq "$?" 0 "fresh mysql, archive line ${same_pool_line%$'\r'}: provisioning succeeds"
+    assert_file_lacks "$WORK_DIR/fresh.out" "was not kept" "fresh mysql, archive line ${same_pool_line%$'\r'}: the same size written another way is not reported as dropped"
+done
 
 reset_fake_docker
 make_mysql_fresh_stage mariadb
