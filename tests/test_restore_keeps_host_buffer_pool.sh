@@ -23,11 +23,14 @@ run_restore() {
         "") ;;
         nul:*) printf '# \000 binary\nMYSQL_BUFFER_POOL_SIZE="%s"\n' "${destination_size#nul:}" >>"$app_dir/.env" ;;
         line:*) printf '%s\n' "${destination_size#line:}" >>"$app_dir/.env" ;;
+        bom:*) { printf '\357\273\277MYSQL_BUFFER_POOL_SIZE=%s\n' "${destination_size#bom:}"; cat "$app_dir/.env"; } >"$case_dir/bom.env" && mv "$case_dir/bom.env" "$app_dir/.env" ;;
         *) printf 'MYSQL_BUFFER_POOL_SIZE="%s"\n' "$destination_size" >>"$app_dir/.env" ;;
     esac
     case "$archive_size" in
         "") ;;
         export:*) printf 'export MYSQL_BUFFER_POOL_SIZE=%s\nAFTER_POOL=kept\n' "${archive_size#export:}" >>"$src/.env" ;;
+        colon:*) printf 'MYSQL_BUFFER_POOL_SIZE: %s\nAFTER_POOL=kept\n' "${archive_size#colon:}" >>"$src/.env" ;;
+        bom:*) { printf '\357\273\277MYSQL_BUFFER_POOL_SIZE=%s\n' "${archive_size#bom:}"; cat "$src/.env"; printf 'AFTER_POOL=kept\n'; } >"$case_dir/src-bom.env" && mv "$case_dir/src-bom.env" "$src/.env" ;;
         *) printf 'MYSQL_BUFFER_POOL_SIZE="%s"\nAFTER_POOL=kept' "$archive_size" >>"$src/.env" ;;
     esac
     printf 'services:\n  pasarguard:\n    image: registry.invalid/panel:source\n  mysql:\n    image: mysql:9.7\n' >"$src/docker-compose.yml"
@@ -175,6 +178,44 @@ if [ "$(pool_lines "$CASE_H")" = 'MYSQL_BUFFER_POOL_SIZE="1024M"' ]; then
     pass "a NUL byte in the destination .env does not hide its size"
 else
     fail "a NUL byte in the destination .env does not hide its size (got '$(pool_lines "$CASE_H")')"
+fi
+
+any_pool_lines() { grep -aE 'MYSQL_BUFFER_POOL_SIZE' "$1/app/.env"; }
+
+CASE_I="$WORK_DIR/case-i"
+run_restore "$CASE_I" 'line:MYSQL_BUFFER_POOL_SIZE: 2048M' 4096M
+check_completed "$CASE_I" "a restore onto a host whose own setting uses the KEY: value form"
+if [ "$(any_pool_lines "$CASE_I")" = 'MYSQL_BUFFER_POOL_SIZE: 2048M' ]; then
+    pass "a KEY: value destination size is kept, and the archive's size is dropped"
+else
+    fail "a KEY: value destination size is kept, and the archive's size is dropped (got '$(any_pool_lines "$CASE_I" | tr '\n' '|')')"
+fi
+
+CASE_J="$WORK_DIR/case-j"
+run_restore "$CASE_J" 512M colon:4096M
+check_completed "$CASE_J" "a restore of a backup whose size uses the KEY: value form"
+if [ "$(any_pool_lines "$CASE_J")" = 'MYSQL_BUFFER_POOL_SIZE="512M"' ]; then
+    pass "a KEY: value archive size is dropped like any other form"
+else
+    fail "a KEY: value archive size is dropped like any other form (got '$(any_pool_lines "$CASE_J" | tr '\n' '|')')"
+fi
+
+CASE_K="$WORK_DIR/case-k"
+run_restore "$CASE_K" bom:1536M 4096M
+check_completed "$CASE_K" "a restore onto a host whose .env starts with a UTF-8 BOM on its size line"
+if [ "$(any_pool_lines "$CASE_K")" = 'MYSQL_BUFFER_POOL_SIZE=1536M' ]; then
+    pass "a BOM-prefixed destination size is kept, without the BOM in the middle of .env"
+else
+    fail "a BOM-prefixed destination size is kept, without the BOM in the middle of .env (got '$(any_pool_lines "$CASE_K" | od -c | head -n 3 | tr '\n' ' ')')"
+fi
+
+CASE_L="$WORK_DIR/case-l"
+run_restore "$CASE_L" 512M bom:4096M
+check_completed "$CASE_L" "a restore of a backup whose .env starts with a UTF-8 BOM on its size line"
+if [ "$(any_pool_lines "$CASE_L")" = 'MYSQL_BUFFER_POOL_SIZE="512M"' ]; then
+    pass "a BOM-prefixed archive size is dropped like any other form"
+else
+    fail "a BOM-prefixed archive size is dropped like any other form (got '$(any_pool_lines "$CASE_L" | od -c | head -n 3 | tr '\n' ' ')')"
 fi
 
 BAD_ENV="$WORK_DIR/bad.env"

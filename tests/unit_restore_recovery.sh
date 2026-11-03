@@ -505,6 +505,7 @@ assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps postgresql" "fresh
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: database container from Compose returned to the caller"
 assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh: .env installed 0600"
 assert_true "fresh: a PostgreSQL .env is installed exactly as archived" cmp -s "$ENV_FILE" "$stage/.env"
+assert_file_lacks "$WORK_DIR/fresh.out" "MYSQL_BUFFER_POOL_SIZE" "fresh: a PostgreSQL recovery says nothing about the MySQL buffer pool"
 assert_eq "$(cat "$APP_DIR/.pasarguard-fresh-restore" 2>/dev/null)" "$(sha256sum <"$stage/backup-files.sha256" | awk '{print $1}')" "fresh: provisioned installation marked with the backup's inventory hash"
 
 make_mysql_fresh_stage() {
@@ -532,6 +533,22 @@ assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps mysql" "fresh mysq
 assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="384M"' "fresh mysql: the database starts with this host's buffer pool size, not the archive's"
 assert_true "fresh mysql: the archive's last line, which had no newline, is kept intact" grep -qx 'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://app:example-pass@127.0.0.1:3306/appdb"' "$ENV_FILE"
 assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh mysql: .env stays 0600 after the size is set"
+assert_file_has "$WORK_DIR/fresh.out" 'MYSQL_BUFFER_POOL_SIZE="4096M"' "fresh mysql: the archive's own buffer pool size is reported, not dropped silently"
+
+reset_fake_docker
+make_mysql_fresh_stage
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "mysql@$DIGEST_B"
+(
+    pin_host_buffer_pool_line() { return 1; }
+    prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+)
+assert_eq "$?" 1 "fresh mysql pin failure: provisioning stops"
+assert_eq "$(find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name backup 2>/dev/null | wc -l)" 0 "fresh mysql pin failure: the application directory stays empty, so the same --fresh command can run again"
+assert_file_has "$WORK_DIR/fresh.out" "MYSQL_BUFFER_POOL_SIZE" "fresh mysql pin failure: the error names the buffer pool setting"
+prepare_fresh_restore "$stage" mysql "$WORK_DIR/fresh.log" 3306 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh mysql pin failure: running --fresh again provisions"
+assert_eq "$(grep -E '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 'MYSQL_BUFFER_POOL_SIZE="384M"' "fresh mysql pin failure: the second run sets this host's size"
 
 reset_fake_docker
 make_mysql_fresh_stage mariadb
@@ -552,6 +569,7 @@ fake_image_present "mysql@$DIGEST_B"
 )
 assert_eq "$?" 0 "fresh mysql skew: a pasarguard.sh without the sizing function still provisions"
 assert_eq "$(grep -cE '^[[:space:]]*MYSQL_BUFFER_POOL_SIZE' "$ENV_FILE")" 0 "fresh mysql skew: the archive's buffer pool size is dropped, so the template default applies"
+assert_file_has "$WORK_DIR/fresh.out" 'MYSQL_BUFFER_POOL_SIZE="4096M"' "fresh mysql skew: the dropped archive size is reported"
 
 # Offline: no registry digest was recorded, the original image ID is loaded.
 reset_fake_docker

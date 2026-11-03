@@ -898,7 +898,15 @@ wait_for_recovery_database() {
 # finish; holds the SHA256 of that backup's checksum inventory.
 FRESH_RESTORE_MARKER=".pasarguard-fresh-restore"
 
-BUFFER_POOL_LINE_PATTERN='^[[:space:]]*(export[[:space:]]+)?MYSQL_BUFFER_POOL_SIZE[[:space:]]*='
+BUFFER_POOL_BOM=$'\xEF\xBB\xBF'
+BUFFER_POOL_LINE_PATTERN="^($BUFFER_POOL_BOM)?[[:space:]]*(export[[:space:]]+)?MYSQL_BUFFER_POOL_SIZE[[:space:]]*[=:]"
+
+last_buffer_pool_line() {
+    local line=""
+    [ -f "$1" ] || return 0
+    line=$(tr -d '\000' <"$1" | grep -aE "$BUFFER_POOL_LINE_PATTERN" | tail -n 1) || line=""
+    printf '%s\n' "${line#"$BUFFER_POOL_BOM"}"
+}
 
 recovery_host_buffer_pool_line() {
     local size=""
@@ -913,6 +921,7 @@ pin_host_buffer_pool_line() {
     local line="$1" target="$2"
     [ -f "$target" ] || return 0
     [ -z "$line" ] || [[ "$line" =~ $BUFFER_POOL_LINE_PATTERN ]] || return 1
+    line="${line#"$BUFFER_POOL_BOM"}"
     sed -i -E "/$BUFFER_POOL_LINE_PATTERN/d" "$target" || return 1
     [ -n "$line" ] || return 0
     if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
@@ -1093,11 +1102,20 @@ prepare_fresh_restore() {
         }
         colorized_echo blue "Using recorded image $reference as $image"
     done
+    if [[ "$engine" =~ ^(mysql|mariadb)$ ]]; then
+        local archived_pool_line="" host_pool_line=""
+        archived_pool_line=$(last_buffer_pool_line "$stage/.env")
+        host_pool_line=$(recovery_host_buffer_pool_line)
+        if ! pin_host_buffer_pool_line "$host_pool_line" "$stage/.env"; then
+            colorized_echo red "Cannot set this host's MYSQL_BUFFER_POOL_SIZE in the recovered .env. Nothing was installed; fix the cause and run the same --fresh command again."
+            return 1
+        fi
+        if [ -n "$archived_pool_line" ] && [ "$archived_pool_line" != "$host_pool_line" ]; then
+            colorized_echo yellow "The backup's buffer pool setting was not kept: $archived_pool_line. This host uses ${host_pool_line:-the Compose default}. To use the backup's value, put it in $ENV_FILE and run pasarguard restart."
+        fi
+    fi
     mkdir -p "$APP_DIR" "$DATA_DIR" || return 1
     install -m 600 "$stage/.env" "$ENV_FILE" || return 1
-    if [[ "$engine" =~ ^(mysql|mariadb)$ ]]; then
-        pin_host_buffer_pool_line "$(recovery_host_buffer_pool_line)" "$ENV_FILE" || return 1
-    fi
     install -m 600 "$recovery_compose" "$COMPOSE_FILE" || return 1
     # From here on the directories are no longer empty. Record which backup
     # provisioned them, so running the same --fresh command again continues
@@ -1235,7 +1253,7 @@ restore_command() {
                 ;;
             esac
         done <"$ENV_FILE"
-        current_buffer_pool_line=$(tr -d '\000' <"$ENV_FILE" | grep -aE "$BUFFER_POOL_LINE_PATTERN" | tail -n 1)
+        current_buffer_pool_line=$(last_buffer_pool_line "$ENV_FILE")
         set -e
     fi
     if [ "$fresh_restore" = true ] || [ "$fresh_resume" = true ]; then
