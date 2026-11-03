@@ -97,3 +97,6 @@ jobs:
 
       - name: The test harness fails a test that leaves temporary files
         run: bash tests/run_isolated.sh tests/test_run_isolated.sh
+
+      - name: The backup roundtrip removes its database container with its anonymous volumes
+        run: bash tests/run_isolated.sh tests/test_roundtrip_removes_its_volumes.sh

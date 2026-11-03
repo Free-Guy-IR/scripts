@@ -83,7 +83,7 @@ cleanup() {
             sed -n '1,220p' "$log_path" >&2 || true
         done < <(find "$WORK_DIR" -type f -name '*.log' | sort)
     fi
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rm -f -v "$CONTAINER_NAME" >/dev/null 2>&1 || true
     rm -rf "$EXTRACTED_BACKUP_DIR"
     rm -f "$COMBINED_BACKUP_ARCHIVE"
     rm -rf "$WORK_DIR"
@@ -543,7 +543,7 @@ rotate_destination_credentials() {
         ;;
     timescaledb)
         if [ -n "${TIMESCALE_TARGET_IMAGE:-}" ]; then
-            docker rm -f "$CONTAINER_NAME" >/dev/null
+            docker rm -f -v "$CONTAINER_NAME" >/dev/null
             setup_postgresql_container "$TIMESCALE_TARGET_IMAGE" "$CURRENT_DB_PASSWORD" "mutated"
         else
             docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" psql -U "$DB_USER" -d postgres \

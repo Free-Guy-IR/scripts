@@ -208,7 +208,9 @@ install without the variable drops the destination's size back to 256M.
   - `restore --fresh` sets the value for the recovery host in the staged copy of the archive's `.env` before it
     creates or installs anything, so the database starts with it, and again after the app-directory sync installs
     the archive's `.env` a second time. When the archive's value differs from the one written, it prints the
-    archive's line in yellow (values are compared without quotes, spaces or a carriage return). When the value
+    archive's line in yellow (values are compared without quotes, spaces or a carriage return; an inline
+    `# comment` after the value is not removed, so `896M # tuned` still prints against a host size of 896M
+    although Compose reads 896M; the line is informational only and the installer never writes a comment). When the value
     cannot be written, it stops in red before it writes anything to the application or data directory, only the
     recorded images have been tagged by then, and the same `--fresh` command can be run again.
   - A `MYSQL_BUFFER_POOL_SIZE` line counts in the `KEY=value`, `export KEY=value` and `KEY: value` forms, which
@@ -297,7 +299,11 @@ code, tests and docs without upstream's code comments, with these changes:
   while another writer holds the lock: the restore waits for the writer, keeps a compose change the writer made
   with the copy from before the switch, restores the file byte-identical when the writer changed nothing, and,
   raced against `compose_add_device`, never loses the device. `tests/unit_pgnode.sh` covers a signal during the
-  release and a restore whose message write fails.
+  release and a restore whose message write fails. That signal lands right after `flock -u`; a signal between
+  marking the lock released and `flock -u` has no test. In that window the restore's `acquire_node_env_lock`
+  reopens fd 8, which drops the shell's only reference to the locked open file description (no child holding fd 8
+  is alive there), so the lock is released and taken again, and a waiting writer that gets it first only makes the
+  restore wait.
 
 ## Certificate paths of a custom-name node, and node-serviced (fork only)
 
@@ -395,6 +401,14 @@ These tests are in `tests/`. `.github/workflows/fork-regression-tests.yml` runs 
 - `test_restore_keeps_host_buffer_pool.sh`
 - `test_node_image_switch_interleaving.sh`
 - `test_run_isolated.sh`
+- `test_roundtrip_removes_its_volumes.sh`
+
+The fork's `tests/backup_restore_roundtrip.sh` removes its database container with `docker rm -f -v`, in the EXIT
+cleanup and where the TimescaleDB case replaces the container. Upstream's `docker rm -f` leaves the image's anonymous
+`/var/lib/mysql` or `/var/lib/postgresql/data` volume behind after every run, which piled up dangling volumes on a
+shared test host. `test_roundtrip_removes_its_volumes.sh` runs the roundtrip for MySQL, MariaDB, PostgreSQL and
+TimescaleDB against a `docker` stub whose `run` fails, checks that the cleanup removes the container with its
+volumes, and checks every `docker rm` in the file.
 
 Every test step of `fork-regression-tests.yml`, `upstream-parity.yml` and `pgbouncer-prepared-statements.yml`,
 and every suite in `tests/run_all.sh`, runs through `tests/run_isolated.sh`; the parity check itself and the steps
