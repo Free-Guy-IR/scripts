@@ -1312,6 +1312,7 @@ node_service_api_ready() {
     # API_PORT. New installations still write the script-selected port.
     api_port="${api_port:-3000}"
     ssl_cert="${ssl_cert:-$SSL_CERT_FILE}"
+    ssl_cert=$(node_service_host_path "$ssl_cert")
 
     if ! [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]] ||
         [ -z "$api_key" ] || [[ "$api_key" == *$'\n'* || "$api_key" == *$'\r'* ]] ||
@@ -2546,6 +2547,49 @@ node_compose_data_mount_target() {
     printf '%s\n' "${volume%%:*}"
 }
 
+node_compose_data_mount_source() {
+    local volume
+    [ -f "$APP_DIR/docker-compose.yml" ] || return 0
+    command -v yq >/dev/null 2>&1 || return 0
+    volume=$(yq eval -r '.services["node"].volumes[0] // ""' "$APP_DIR/docker-compose.yml" 2>/dev/null) || return 0
+    [[ "$volume" == *:* ]] || return 0
+    printf '%s\n' "${volume%%:*}"
+}
+
+node_service_data_bind() {
+    local source target cert key
+    [ "$APP_NAME" != "pg-node" ] || return 0
+    target=$(node_compose_data_mount_target)
+    source=$(node_compose_data_mount_source)
+    [[ "$source" =~ ^/[A-Za-z0-9_./-]*$ && "$target" =~ ^/[A-Za-z0-9_./-]*$ ]] || return 0
+    source="${source%/}"
+    target="${target%/}"
+    [[ -n "$source" && -n "$target" && "$source" != "$target" ]] || return 0
+    [[ "$source" != "$target"/* && "$target" != "$source"/* ]] || return 0
+    cert=$(read_node_service_env_value SSL_CERT_FILE) || return 0
+    key=$(read_node_service_env_value SSL_KEY_FILE) || return 0
+    [[ "$cert" == "$target"/* || "$key" == "$target"/* ]] || return 0
+    printf '%s:%s\n' "$source" "$target"
+}
+
+node_service_unit_data_bind() {
+    [ -r "$SERVICE_UNIT" ] || return 0
+    sed -n 's/^BindReadOnlyPaths=\(\/[^:]*\):\(\/.*\)$/\1:\2/p' "$SERVICE_UNIT" | head -n 1
+}
+
+node_service_host_path() {
+    local path="$1"
+    local bind source target
+    bind=$(node_service_unit_data_bind)
+    source="${bind%%:*}"
+    target="${bind#*:}"
+    if [ -n "$bind" ] && [[ "$path" == "$target"/* ]]; then
+        printf '%s%s\n' "$source" "${path#"$target"}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
 node_env_ssl_paths_stale() {
     local current_cert current_key
     current_cert=$(grep -E '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_CERT_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
@@ -2979,11 +3023,13 @@ restart_command() {
 }
 
 write_node_service_unit() {
-    local unit_dir unit_temp
+    local unit_dir unit_temp data_bind
 
     unit_dir=$(dirname "$SERVICE_UNIT")
     unit_temp=$(create_temp_file_in_dir "$unit_dir" ".${SERVICE_NAME}.unit" "") || return 1
-    if ! cat >"$unit_temp" <<EOF
+    data_bind=$(node_service_data_bind)
+    if ! {
+        cat <<EOF
 [Unit]
 Description=PasarGuard Node Service API ($APP_NAME)
 After=network-online.target docker.service
@@ -2999,10 +3045,15 @@ TimeoutStopSec=10
 Environment="ENV_FILE=$ENV_FILE"
 Environment="APP_NAME=$APP_NAME"
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+        if [ -n "$data_bind" ]; then
+            printf 'BindReadOnlyPaths=%s\n' "$data_bind"
+        fi
+        cat <<EOF
 [Install]
 WantedBy=multi-user.target
 EOF
-    then
+    } >"$unit_temp"; then
         rm -f "$unit_temp"
         return 1
     fi
@@ -3432,12 +3483,52 @@ logs_command() {
 
 SWITCH_COMPOSE_BEFORE=""
 SWITCH_COMPOSE_AFTER=""
+SWITCH_COMPOSE_STATE=""
+
+disarm_switch_guard() {
+    SWITCH_COMPOSE_BEFORE=""
+    SWITCH_COMPOSE_AFTER=""
+    SWITCH_COMPOSE_STATE=""
+    trap - EXIT
+}
 
 discard_switch_backups() {
     rm -f "$SWITCH_COMPOSE_BEFORE" "$SWITCH_COMPOSE_AFTER"
-    SWITCH_COMPOSE_BEFORE=""
-    SWITCH_COMPOSE_AFTER=""
-    trap - EXIT
+    disarm_switch_guard
+}
+
+keep_switch_backup() {
+    rm -f "$SWITCH_COMPOSE_AFTER"
+    colorized_echo red "✗ $1; its content before the switch is in $SWITCH_COMPOSE_BEFORE."
+    disarm_switch_guard
+}
+
+undo_node_image_switch() {
+    local reason="$1"
+    local undo_status=0
+    trap '' HUP INT TERM
+    if [ -z "$SWITCH_COMPOSE_STATE" ]; then
+        :
+    elif [ "$SWITCH_COMPOSE_STATE" = saving ]; then
+        discard_switch_backups
+    elif ! acquire_node_env_lock; then
+        keep_switch_backup "$reason and $ENV_FILE stayed locked, so $COMPOSE_FILE still names the new image"
+        undo_status=1
+    elif [ "$SWITCH_COMPOSE_STATE" = switched ] && ! cmp -s "$COMPOSE_FILE" "$SWITCH_COMPOSE_AFTER"; then
+        release_node_env_lock
+        keep_switch_backup "$reason and $COMPOSE_FILE was changed by another command meanwhile, so it was not restored"
+        undo_status=1
+    elif ! cat "$SWITCH_COMPOSE_BEFORE" >"$COMPOSE_FILE"; then
+        release_node_env_lock
+        keep_switch_backup "$reason and $COMPOSE_FILE could not be restored"
+        undo_status=1
+    else
+        release_node_env_lock
+        colorized_echo red "✗ $reason; $COMPOSE_FILE was restored and the node keeps its previous image."
+        discard_switch_backups
+    fi
+    trap - HUP INT TERM
+    return "$undo_status"
 }
 
 switch_node_image() {
@@ -3446,47 +3537,32 @@ switch_node_image() {
     local target_image="$3"
     colorized_echo blue "Switching node image to: $image_tag"
     if ! acquire_node_env_lock; then
-        colorized_echo red "✗ Could not lock $ENV_FILE; the node image was not switched."
+        colorized_echo red "✗ Could not lock $ENV_FILE; the node image was not switched and $COMPOSE_FILE was not changed."
         exit 1
     fi
     if [ "$(retag_node_image "$(node_compose_image "$COMPOSE_FILE")" "$image_tag")" != "$target_image" ]; then
         release_node_env_lock
-        colorized_echo red "✗ The node image in $COMPOSE_FILE changed while $target_image was pulled; nothing was changed."
+        colorized_echo red "✗ The node image in $COMPOSE_FILE changed while $target_image was pulled; $COMPOSE_FILE was not changed."
         exit 1
     fi
     SWITCH_COMPOSE_BEFORE=$(mktemp "$APP_DIR/.docker-compose.before.XXXXXX") || die "Could not back up $COMPOSE_FILE"
-    SWITCH_COMPOSE_AFTER=$(mktemp "$APP_DIR/.docker-compose.after.XXXXXX") || die "Could not back up $COMPOSE_FILE"
-    trap 'rm -f "$SWITCH_COMPOSE_BEFORE" "$SWITCH_COMPOSE_AFTER"' EXIT
+    if ! SWITCH_COMPOSE_AFTER=$(mktemp "$APP_DIR/.docker-compose.after.XXXXXX"); then
+        rm -f "$SWITCH_COMPOSE_BEFORE"
+        die "Could not back up $COMPOSE_FILE"
+    fi
+    SWITCH_COMPOSE_STATE=saving
+    trap 'undo_node_image_switch "The update stopped before the image switch finished"' EXIT
     cat "$COMPOSE_FILE" >"$SWITCH_COMPOSE_BEFORE" || die "Could not back up $COMPOSE_FILE"
+    SWITCH_COMPOSE_STATE=switching
     if ! set_node_image_tag "$image_tag" "$COMPOSE_FILE"; then
-        cat "$SWITCH_COMPOSE_BEFORE" >"$COMPOSE_FILE"
-        release_node_env_lock
-        colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required); it was restored."
+        undo_node_image_switch "Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required)"
         exit 1
     fi
     cat "$COMPOSE_FILE" >"$SWITCH_COMPOSE_AFTER" || die "Could not back up $COMPOSE_FILE"
+    SWITCH_COMPOSE_STATE=switched
     release_node_env_lock
     report_dropped_image_digest "$current_image" "$image_tag"
     colorized_echo green "✓ Docker image version set to: $image_tag ($target_image)"
-}
-
-restore_switched_compose() {
-    if ! acquire_node_env_lock; then
-        colorized_echo red "✗ The pull failed and $ENV_FILE stayed locked, so $COMPOSE_FILE still names the new image; its previous content is in $SWITCH_COMPOSE_BEFORE."
-        trap - EXIT
-        return 1
-    fi
-    if cmp -s "$COMPOSE_FILE" "$SWITCH_COMPOSE_AFTER"; then
-        cat "$SWITCH_COMPOSE_BEFORE" >"$COMPOSE_FILE"
-        colorized_echo red "✗ The pull failed; $COMPOSE_FILE was restored and the node keeps its previous image."
-        release_node_env_lock
-        discard_switch_backups
-        return 0
-    fi
-    release_node_env_lock
-    colorized_echo red "✗ The pull failed and $COMPOSE_FILE was changed by another command meanwhile, so it was not restored; its content before the switch is in $SWITCH_COMPOSE_BEFORE."
-    trap - EXIT
-    return 1
 }
 
 # Update node script, completions, container images, and restart services.
@@ -3575,7 +3651,7 @@ update_command() {
     colorized_echo blue "Pulling latest version"
     if [ "$node_version_set" = true ]; then
         if ! update_node; then
-            restore_switched_compose
+            undo_node_image_switch "The pull failed" || true
             exit 1
         fi
         discard_switch_backups
@@ -4016,7 +4092,7 @@ usage() {
     colorized_echo yellow "  --no-restart-service    $(tput sgr0)✓  Skip restarting systemd service"
     colorized_echo cyan "Update Options:"
     colorized_echo yellow "  --no-update-service     $(tput sgr0)✓  Skip updating systemd service"
-    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Switch to the dev image (unreleased, for testing)"
+    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Switch to the unreleased main image (ghcr.io/free-guy-ir/node:main, for testing)"
     colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Switch to a release tag, latest or pre-release"
     colorized_echo cyan "Uninstall Options:"
     colorized_echo yellow "  -y, --yes               $(tput sgr0)✓  Auto-confirm uninstall and data removal"
@@ -4024,7 +4100,7 @@ usage() {
     colorized_echo cyan "Install Options:"
     colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Install specific version"
     colorized_echo yellow "  --pre-release           $(tput sgr0)✓  Install pre-release version"
-    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Install the dev image (unreleased, for testing)"
+    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Install the unreleased main image (ghcr.io/free-guy-ir/node:main, for testing)"
     colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Install with custom name"
     colorized_echo yellow "  --override              $(tput sgr0)✓  Override existing installation"
     colorized_echo yellow "  --api-key KEY           $(tput sgr0)✓  Set API Key"

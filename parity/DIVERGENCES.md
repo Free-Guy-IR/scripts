@@ -234,12 +234,17 @@ code, tests and docs without upstream's code comments, with these changes:
   build without the fork's changes, and `image-branch.yml` publishes `ghcr.io/free-guy-ir/node:<branch>` for every
   pushed branch after its tests pass, moving the tag only while the branch still points at the built commit. So
   `ghcr.io/free-guy-ir/node:main` is the fork's current unreleased build. Upstream's `--dev` selects `pasarguard/node:dev`.
+  This mapping was accepted on 2026-11-03 after the node fork's "Build and Push (All Branches)" workflow was checked:
+  it publishes `:main` only from `main`, after the tests and drift jobs pass, while `:dev` is a 2026-09-09 build of
+  a 2026-07 branch.
 - `update --dev` and `update --version` pull the target image before any change, and stop with nothing changed when
   that pull fails, for example for a release whose image was never published. Upstream rewrites the compose file
   first, so a failed pull leaves it on a tag that cannot be pulled. The rewrite then happens under the `.env` lock
   and is refused if the image repository in the compose file changed during the pull. If the following
   `docker compose pull` fails, the compose file is restored byte-identical while it still holds what the switch
-  wrote. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
+  wrote. The same restore runs from the EXIT trap when the update is interrupted by SIGINT, SIGTERM or SIGHUP, under
+  the `.env` lock; the trap is armed only once both backup files exist. When the compose file was changed by another
+  command meanwhile, the update keeps the copy from before the switch, removes the other one and prints the path. `install` with `--dev`, `--version` or `--pre-release` writes the tag into the staged compose file and pulls
   that image before it takes the lock, so a yq failure or a missing image stops it before the certificate, `.env`
   or compose file change.
 - A digest pin (`image@sha256:...` or `image:tag@sha256:...`) is replaced by the requested tag and reported.
@@ -274,6 +279,32 @@ code, tests and docs without upstream's code comments, with these changes:
   read-modify-write, against a lock held past the wait, and, with a yq that sleeps between reading and writing the
   file, a switch concurrent with `compose_add_device` and two concurrent switches; it checks that the slow
   read-modify-writes never overlap and that no change is lost.
+
+## Certificate paths of a custom-name node, and node-serviced (fork only)
+
+A node installed under another name (`pg-node install --name my-node`) gets the volume `/var/lib/my-node:/var/lib/my-node`,
+and `sync_env_ssl_paths` points `SSL_CERT_FILE` and `SSL_KEY_FILE` in `.env` at `/var/lib/my-node/certs`. One `.env`
+is read by two programs: the node container, through `env_file`, and node-serviced, on the host, through
+`godotenv.Overload`.
+
+- `sync_env_ssl_paths` leaves `.env` alone when the node's first volume mounts the data directory at
+  `/var/lib/pg-node` (for example `/var/lib/my-node:/var/lib/pg-node`), because there `/var/lib/pg-node/certs` is the
+  path that exists inside the container. Upstream rewrites it to `/var/lib/my-node/certs`, which the container cannot
+  read, so the node crash-loops at its next recreate.
+- On that layout the host has no `/var/lib/pg-node`, or it holds the certificate of a default `pg-node` node on the
+  same host. `service-install` therefore writes `BindReadOnlyPaths=/var/lib/my-node:/var/lib/pg-node` into the
+  node-serviced unit, so node-serviced sees the data directory where the container sees it, and the readiness probe
+  reads the certificate from the host directory that bind names. The line is written only for a custom name, an
+  absolute host source that differs from the target, and a `.env` whose certificate or key path lies under the
+  target. Every other unit is byte-identical to before. `pg-node update` does not rewrite the unit, so an existing
+  installation on that layout gets the line from `sudo my-node service-install`.
+- Residual V2 (owner: the scripts lane, review by 2026-11-10): long-syntax volumes, a data volume that is not the
+  first, `${VAR}` interpolation, or a host without mikefarah yq are not recognised and keep the old rewrite, as on
+  upstream.
+- Residual V3 (owner: the scripts lane, review by 2026-11-10): a node whose `.env` an older script already rewrote
+  to `/var/lib/my-node/certs` while it mounts at `/var/lib/pg-node` is not repaired; its `.env` needs a manual fix.
+- Tests: the mount cases of `sync_env_ssl_paths` in `tests/unit_pgnode.sh`, and the unit and readiness cases in
+  `tests/test_node_service_unit_mode.sh`. Both need mikefarah yq and print a skip line without it.
 
 ## Upstream pull request #32, "restore PgBouncer with asyncpg prepared statement compatibility (#882)"
 

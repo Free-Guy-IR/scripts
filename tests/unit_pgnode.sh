@@ -1317,6 +1317,9 @@ UPDATE_CASE=0
 UPDATE_TAG_FAILS="false"
 DOCKER_PULL_FAILS="false"
 COMPOSE_PULL_FAILS="false"
+COMPOSE_PULL_SIGNAL=""
+COMPOSE_PULL_MUTATES="false"
+TAG_WRITE_SIGNAL=""
 
 make_update_fixture() {
     local image="${2:-ghcr.io/free-guy-ir/node}"
@@ -1352,7 +1355,17 @@ run_update_command() {
         install_package() { :; }
         install_yq() { :; }
         detect_compose() { COMPOSE="fake_compose"; }
-        fake_compose() { echo "compose $*" >> "$UPDATE_CALLS"; [ "$COMPOSE_PULL_FAILS" != "true" ] || [ "${*: -1}" != "pull" ]; }
+        UPDATE_PID=$BASHPID
+        fake_compose() {
+            echo "compose $*" >> "$UPDATE_CALLS"
+            if [ "${*: -1}" = "pull" ] && [ "$COMPOSE_PULL_MUTATES" = "true" ]; then
+                printf '    labels: [added-meanwhile]\n' >> "$COMPOSE_FILE"
+            fi
+            if [ "${*: -1}" = "pull" ] && [ -n "$COMPOSE_PULL_SIGNAL" ]; then
+                kill -s "$COMPOSE_PULL_SIGNAL" "$UPDATE_PID"
+            fi
+            [ "$COMPOSE_PULL_FAILS" != "true" ] || [ "${*: -1}" != "pull" ]
+        }
         docker() { echo "docker $*" >> "$UPDATE_CALLS"; [ "$DOCKER_PULL_FAILS" != "true" ]; }
         ensure_docker_service_running() { :; }
         update_node_script() { echo "update_node_script" >> "$UPDATE_CALLS"; }
@@ -1362,6 +1375,12 @@ run_update_command() {
         curl() { echo "curl $*" >> "$UPDATE_CALLS"; release_api_reply "$@"; }
         if [ "$UPDATE_TAG_FAILS" = "true" ]; then
             set_node_image_tag() { return 1; }
+        fi
+        if [ -n "$TAG_WRITE_SIGNAL" ]; then
+            set_node_image_tag() {
+                printf 'services:\n  node:\n    image: half-written\n' > "$2"
+                kill -s "$TAG_WRITE_SIGNAL" "$UPDATE_PID"
+            }
         fi
         update_command "$@" 2>&1
     ); then
@@ -1630,6 +1649,69 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     assert_true "plain update when the compose pull fails: compose file byte-identical" \
         fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
     assert_false "plain update: never pulls by itself" grep -q "^docker pull" "$UPDATE_CALLS"
+
+    for pull_signal in TERM:143 INT:130 HUP:129; do
+        make_update_fixture "latest"
+        COMPOSE_PULL_SIGNAL="${pull_signal%%:*}"
+        run_update_command --dev
+        COMPOSE_PULL_SIGNAL=""
+        assert_eq "$UPDATE_STATUS" "${pull_signal#*:}" "update --dev, SIG${pull_signal%%:*} during the compose pull: dies by the signal"
+        assert_true "update --dev, SIG${pull_signal%%:*} during the compose pull: compose file restored byte-identical" \
+            fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+        assert_false "update --dev, SIG${pull_signal%%:*} during the compose pull: container not recreated" \
+            grep -q " up -d" "$UPDATE_CALLS"
+        assert_false "update --dev, SIG${pull_signal%%:*} during the compose pull: lock released" \
+            test -s "$UPDATE_DIR/app/.env.lock"
+        assert_false "update --dev, SIG${pull_signal%%:*} during the compose pull: no backup left behind" \
+            bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+        if [[ "$UPDATE_OUT" == *"was restored and the node keeps its previous image"* ]]; then
+            pass "update --dev, SIG${pull_signal%%:*} during the compose pull: says the compose file was restored"
+        else
+            fail "update --dev, SIG${pull_signal%%:*} during the compose pull: says the compose file was restored (got: $UPDATE_OUT)"
+        fi
+        assert_secrets_unchanged "update --dev, SIG${pull_signal%%:*} during the compose pull"
+    done
+
+    make_update_fixture "latest"
+    TAG_WRITE_SIGNAL="TERM"
+    run_update_command --dev
+    TAG_WRITE_SIGNAL=""
+    assert_eq "$UPDATE_STATUS" "143" "update --dev, SIGTERM while the tag is written under the lock: dies by the signal"
+    assert_true "update --dev, SIGTERM while the tag is written under the lock: compose file restored byte-identical" \
+        fixture_unchanged "$UPDATE_DIR/app/docker-compose.yml"
+    assert_false "update --dev, SIGTERM while the tag is written under the lock: lock released" \
+        test -s "$UPDATE_DIR/app/.env.lock"
+    assert_false "update --dev, SIGTERM while the tag is written under the lock: no backup left behind" \
+        bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose'"
+
+    for changed_case in "fails|1" "TERM|143"; do
+        make_update_fixture "latest"
+        COMPOSE_PULL_MUTATES="true"
+        if [ "${changed_case%%|*}" = "fails" ]; then
+            COMPOSE_PULL_FAILS="true"
+        else
+            COMPOSE_PULL_SIGNAL="${changed_case%%|*}"
+        fi
+        run_update_command --dev
+        COMPOSE_PULL_MUTATES="false"
+        COMPOSE_PULL_FAILS="false"
+        COMPOSE_PULL_SIGNAL=""
+        changed_label="update --dev, compose pull ${changed_case%%|*} after another command changed the compose file"
+        assert_eq "$UPDATE_STATUS" "${changed_case#*|}" "$changed_label: exit status"
+        assert_true "$changed_label: the other command's change is kept" \
+            grep -q "added-meanwhile" "$UPDATE_DIR/app/docker-compose.yml"
+        changed_backup=$(find "$UPDATE_DIR/app" -maxdepth 1 -name '.docker-compose.before.*' | head -n 1)
+        assert_true "$changed_label: the copy from before the switch is kept" \
+            cmp -s "$UPDATE_DIR/before/docker-compose.yml" "$changed_backup"
+        assert_false "$changed_label: no .docker-compose.after copy left behind" \
+            bash -c "ls -A '$UPDATE_DIR/app' | grep -q '^.docker-compose.after'"
+        if [[ -n "$changed_backup" && "$UPDATE_OUT" == *"$changed_backup"* ]]; then
+            pass "$changed_label: names the kept copy"
+        else
+            fail "$changed_label: names the kept copy (got: $UPDATE_OUT)"
+        fi
+        assert_false "$changed_label: lock released" test -s "$UPDATE_DIR/app/.env.lock"
+    done
 
     digest="sha256:$(printf '0%.0s' $(seq 1 64))"
     for digest_case in "ghcr.io/free-guy-ir/node@${digest}|--dev|ghcr.io/free-guy-ir/node:main" \

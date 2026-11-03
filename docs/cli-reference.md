@@ -206,8 +206,6 @@ Installs or re-installs a worker node instance.
 - `-v`, `--version <VERSION>`: Install specific node image version: a release tag of `Free-Guy-IR/node` such as `v0.8.20-degraded-start`, or `latest`.
 - `--pre-release`: Install latest pre-release image.
 - `--dev`: Install the `ghcr.io/free-guy-ir/node:main` image, which the node fork's CI builds from its `main` branch after its tests pass. Unreleased, for testing only; `pg-node update` pulls the newest `main` build. Cannot be combined with `--version` or `--pre-release`. To move an existing node to it, use `update --dev` instead.
-
-With `--dev`, `--version` or `--pre-release`, install writes the tag into the downloaded compose file and pulls that image before it takes the `.env` lock. If the tag cannot be written or the image cannot be pulled, install stops and the certificate, `.env` and compose file are not changed.
 - `--name <NAME>`: Custom instance name (creates `/opt/<NAME>` and `/var/lib/<NAME>`).
 - `--override`: Force overwrite existing node instance.
 - `--api-key <KEY>`: Pre-configure API authentication key.
@@ -221,6 +219,8 @@ With `--dev`, `--version` or `--pre-release`, install writes the tag into the do
 - `--san-entries <ENTRIES>`: Comma-separated list of IP/DNS SAN entries.
 - `--install-service`: Automatically install and start the systemd unit.
 - `--no-install-service`: Skip systemd service registration.
+
+With `--dev`, `--version` or `--pre-release`, install writes the tag into the downloaded compose file and pulls that image before it takes the `.env` lock. If the tag cannot be written or the image cannot be pulled, install stops and the certificate, `.env` and compose file are not changed.
 
 ```bash
 sudo pg-node install --name node-eu1 --use-grpc --self-signed
@@ -250,7 +250,7 @@ Updates the `pg-node` script, pulls the node image and recreates the container. 
 - `-v`, `--version <VERSION>`: Switch the node to a release tag of `Free-Guy-IR/node` (`vX.Y.Z` or a suffixed fork tag such as `v0.8.20-degraded-start`), `latest` (the `latest` image tag) or `pre-release` (pins the newest release tag, pre-releases included). Checked against the GitHub releases the same way as `install --version`; if that lookup fails, `pre-release` is refused before anything changes.
 - `--no-update-service`: Do not update the companion node-serviced daemon.
 
-`--dev` and `--version` cannot be combined. Before anything changes, update pulls the target image (`docker pull`). If that pull fails, for example because the tag was never published, update stops: the script, `docker-compose.yml` and the running node are not changed. Otherwise it rewrites the tag while holding the `.env` lock and prints `Docker image version set to: <tag> (<image>)`. If the following `docker compose pull` fails, update restores `docker-compose.yml` byte-identical and stops before recreating the container. A digest pin (`image@sha256:...`) is replaced by the requested tag, and update says so.
+`--dev` and `--version` cannot be combined. Before anything changes, update pulls the target image (`docker pull`). If that pull fails, for example because the tag was never published, update stops: the script, `docker-compose.yml` and the running node are not changed. Otherwise it rewrites the tag while holding the `.env` lock and prints `Docker image version set to: <tag> (<image>)`. If the following `docker compose pull` fails, or the update is interrupted (Ctrl-C, a dropped SSH session, SIGTERM) before the container is recreated, update restores `docker-compose.yml` byte-identical under the `.env` lock and stops. If another command changed `docker-compose.yml` in the meantime, update leaves it as it is and prints the path of its copy from before the switch. A digest pin (`image@sha256:...`) is replaced by the requested tag, and update says so.
 
 The `.env` lock serializes the tag rewrite with the other commands that write `docker-compose.yml` under it: `install`, `core-update` (its volume path) and the device changes of `l2tp-enable` and `install`. `geofiles` only reads the compose file. `edit` opens the compose file in your editor without the lock, so do not run it while another `pg-node` command runs.
 
@@ -295,7 +295,7 @@ The companion `pg-node-service` background daemon maintains synchronization and 
 
 | Command | Description |
 | :--- | :--- |
-| `service-install` | Installs the systemd unit (`pg-node-service.service`) and starts it. |
+| `service-install` | Installs the systemd unit (`pg-node-service.service`) and starts it. For a custom-name node whose data volume is mounted at `/var/lib/pg-node` while `.env` names certificate paths there, the unit binds the host data directory read-only at `/var/lib/pg-node`, so node-serviced reads the same certificate the container does. |
 | `service-start` | Starts the systemd service. |
 | `service-stop` | Stops the systemd service. |
 | `service-restart` | Restarts the systemd service. |
