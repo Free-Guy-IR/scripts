@@ -301,9 +301,10 @@ code, tests and docs without upstream's code comments, with these changes:
   raced against `compose_add_device`, never loses the device. `tests/unit_pgnode.sh` covers a signal during the
   release and a restore whose message write fails. That signal lands right after `flock -u`; a signal between
   marking the lock released and `flock -u` has no test. In that window the restore's `acquire_node_env_lock`
-  reopens fd 8, which drops the shell's only reference to the locked open file description (no child holding fd 8
-  is alive there), so the lock is released and taken again, and a waiting writer that gets it first only makes the
-  restore wait.
+  reopens fd 8, which drops the shell's reference to the locked open file description; the only child that can
+  still hold fd 8 there is the short-lived command substitution that names the lock file for the truncate. So the
+  lock is released and taken again once that child exits, and a writer that gets it first makes the restore wait,
+  or keep the copy from before the switch when it holds the lock past the wait.
 
 ## Certificate paths of a custom-name node, and node-serviced (fork only)
 
